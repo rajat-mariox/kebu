@@ -1,0 +1,52 @@
+# ===== Secrets / credentials (NEVER commit) =====
+*.env
+.env
+.env.*
+!.env.example
+client_secret*.json
+*firebase-adminsdk*.json
+google-services.json
+GoogleService-Info.plist
+*.crt
+*.pem
+*.key
+*.keystore
+*.jks
+serviceAccount*.json
+
+# ===== Dependencies =====
+node_modules/
+.pub-cache/
+.dart_tool/
+
+# ===== Build / generated output =====
+dist/
+dist-ssr/
+build/
+.vite/
+graphify-out/
+.graphify_python
+
+# ===== Archives / large blobs =====
+*.zip
+*.tar
+*.tar.gz
+*.7z
+*.rar
+
+# ===== Temp / scratch / run artifacts =====
+.tmp_run/
+*.log
+*.tmp
+
+# ===== Editor / OS =====
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.swp
+
+# ===== Claude local =====
+.claude/

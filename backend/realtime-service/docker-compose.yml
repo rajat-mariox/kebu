@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  realtime-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+      - "8080:8080"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - MQTT_WS_PORT=8080
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - LOG_LEVEL=info
+      # Firebase (optional)
+      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID:-}
+      - FIREBASE_PRIVATE_KEY=${FIREBASE_PRIVATE_KEY:-}
+      - FIREBASE_CLIENT_EMAIL=${FIREBASE_CLIENT_EMAIL:-}
+      # Backend API (optional)
+      - BACKEND_API_URL=${BACKEND_API_URL:-http://backend:3000}
+      - BACKEND_API_SECRET=${BACKEND_API_SECRET:-your-secret}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Optional: EMQX MQTT Broker (for production use)
+  # mqtt-broker:
+  #   image: emqx/emqx:latest
+  #   ports:
+  #     - "1883:1883"
+  #     - "8083:8083"
+  #     - "8084:8084"
+  #   environment:
+  #     - EMQX_NAME=emqx
+  #     - EMQX_HOST=127.0.0.1
+  #   volumes:
+  #     - emqx_data:/opt/emqx/data
+  #     - emqx_log:/opt/emqx/log
+  #   restart: unless-stopped
+
+volumes:
+  redis_data:
