@@ -116,7 +116,8 @@ export default function AdminManagement() {
     setIsLoading(true);
     try {
       if (activeTab === "admins") {
-        await fetchAdmins();
+        // Roles are needed for the "Add Admin" role dropdown, so load them too.
+        await Promise.all([fetchAdmins(), fetchRoles()]);
       } else {
         await fetchRoles();
       }

@@ -207,6 +207,32 @@ export const toggleOnlineStatus = async (
     );
   }
 
+  // Real-time fan-out to customers so the driver's car appears/disappears on
+  // the booking map instantly. This REST endpoint is the authoritative status
+  // flip (the driver app calls it on every toggle), so broadcasting here makes
+  // the update reliable even if the best-effort socket emit doesn't land.
+  const io = req.app.get("io");
+  if (io) {
+    if (isOnline) {
+      // Only show available cab drivers with a known location.
+      if (!driver.currentBookingId && latitude && longitude) {
+        io.to("customers").emit("driver_status_changed", {
+          driverId: String(driverId),
+          isOnline: true,
+          latitude,
+          longitude,
+          heading: 0,
+          serviceType: driver.serviceType,
+        });
+      }
+    } else {
+      io.to("customers").emit("driver_status_changed", {
+        driverId: String(driverId),
+        isOnline: false,
+      });
+    }
+  }
+
   req.rData = { isOnline };
   req.msg = isOnline ? "driver_online" : "driver_offline";
   next();

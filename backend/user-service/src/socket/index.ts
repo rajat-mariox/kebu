@@ -92,6 +92,10 @@ export const initializeSocket = async (
       connectedDrivers.set(userId, { id: userId, type: "driver", socketId: socket.id });
     } else {
       connectedUsers.set(userId, { id: userId, type: "user", socketId: socket.id });
+      // Shared room for all customers — lets the server fan-out driver
+      // availability changes (online/offline) to every booking screen so the
+      // nearby-driver markers update in real time instead of on the 30s poll.
+      socket.join("customers");
     }
 
     // ===================================================================
@@ -107,6 +111,26 @@ export const initializeSocket = async (
 
         if (latitude != null && longitude != null) {
           await DriverLocationService.updateDriverLocation(driverId, latitude, longitude);
+
+          // Real-time fan-out to customers so the driver's car appears on the
+          // booking map instantly. Only broadcast for available cab drivers —
+          // a driver who is mid-ride or pending approval shouldn't show up as
+          // an available cab. We have coords here, so the marker can be placed.
+          const driverDoc = await DriverService.getDriverById(driverId);
+          if (
+            driverDoc &&
+            driverDoc.status === "approved" &&
+            !driverDoc.currentBookingId
+          ) {
+            io.to("customers").emit("driver_status_changed", {
+              driverId: userId,
+              isOnline: true,
+              latitude,
+              longitude,
+              heading: 0,
+              serviceType: driverDoc.serviceType,
+            });
+          }
         } else {
           console.warn(`[Socket] Driver ${userId} went online without coordinates — asking client to send location_update`);
           socket.emit("location_required", { reason: "no_coords_on_online" });
@@ -124,6 +148,11 @@ export const initializeSocket = async (
       try {
         const driverId = new Types.ObjectId(userId);
         await DriverService.updateDriver(driverId, { isOnline: false });
+        // Real-time fan-out: drop this driver's marker from every customer map.
+        io.to("customers").emit("driver_status_changed", {
+          driverId: userId,
+          isOnline: false,
+        });
         socket.emit("status_updated", { isOnline: false });
         console.log(`Driver ${userId} is now offline`);
       } catch (error) {
@@ -641,6 +670,11 @@ export const initializeSocket = async (
         try {
           const driverId = new Types.ObjectId(userId);
           await DriverService.updateDriver(driverId, { isOnline: false });
+          // Driver dropped connection → remove their marker from customer maps.
+          io.to("customers").emit("driver_status_changed", {
+            driverId: userId,
+            isOnline: false,
+          });
         } catch (error) {
           console.error("Error setting driver offline on disconnect:", error);
         }

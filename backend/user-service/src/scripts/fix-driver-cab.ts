@@ -13,6 +13,7 @@ import config from "../config";
 import Driver from "../models/driver.model";
 import DriverVehicle from "../models/driver-vehicle.model";
 import VehicleType from "../models/vehicle-type.model";
+import VehicleCategory from "../models/vehicle-category.model";
 
 async function main(): Promise<void> {
   if (!config.database.url) throw new Error("DB_URL is not set");
@@ -38,15 +39,21 @@ async function main(): Promise<void> {
     console.log("  serviceType already cab");
   }
 
-  // 2) Ensure a cab vehicle type exists & driver owns one (active+online)
-  const vehicleTypes = await VehicleType.find({ isActive: true })
+  // 2) Ensure a cab vehicle type exists & driver owns one (active+online).
+  //    Prefer a 4-wheeler (CAR) type — a cab driver must not be given a Bike,
+  //    or strict vehicle-type matching will exclude them from car bookings.
+  const carCategory = await VehicleCategory.findOne({ code: "CAR" }).lean();
+  const vehicleTypes = await VehicleType.find({
+    isActive: true,
+    ...(carCategory ? { categoryId: (carCategory as any)._id } : {}),
+  })
     .select({ _id: 1, name: 1 })
     .lean();
   console.log(
-    `\nActive vehicle types: ${vehicleTypes.map((v) => `${v.name}(${v._id})`).join(", ") || "NONE"}`,
+    `\nActive cab vehicle types: ${vehicleTypes.map((v) => `${v.name}(${v._id})`).join(", ") || "NONE"}`,
   );
   if (vehicleTypes.length === 0) {
-    console.log("No vehicle types found — seed vehicle types first.");
+    console.log("No cab vehicle types found — seed vehicle types first.");
     return;
   }
   const vt = vehicleTypes[0];

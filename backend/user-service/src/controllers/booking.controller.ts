@@ -10,7 +10,25 @@ import * as NotificationService from "../services/notification.service";
 import * as AutomationRuleService from "../services/automation-rule.service";
 import * as SubscriptionBenefitsService from "../services/subscription-benefits.service";
 import Offer from "../models/offer.model";
+import DriverVehicle from "../models/driver-vehicle.model";
 import helpers from "../utils/helpers";
+
+/** Great-circle distance between two lat/lng points, in kilometres. */
+const haversineKm = (
+  lat1: number,
+  lng1: number,
+  lat2: number,
+  lng2: number,
+): number => {
+  const R = 6371;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
 
 /**
  * Get fare estimate
@@ -99,9 +117,41 @@ export const getAllFareEstimates = async (
   );
 
   // Get all active vehicle types
-  const vehicleTypes = await VehicleTypeService.getActiveVehicleTypes();
+  const allVehicleTypes = await VehicleTypeService.getActiveVehicleTypes();
 
-  // Calculate fare for each vehicle type + apply promotion rules
+  // Only offer vehicle types that have at least one available driver nearby
+  // (online, approved, free, serviceType "cab") within the same 5km radius the
+  // booking matcher uses — so the rider never picks a vehicle no one can fulfil.
+  const NEARBY_RADIUS_KM = 5;
+  const nearbyDrivers = await DriverLocationService.findNearbyDrivers(
+    pickupLat,
+    pickupLng,
+    NEARBY_RADIUS_KM,
+    undefined,
+    "cab",
+  );
+  const nearbyDriverIds = nearbyDrivers.map((d) => d.driver._id);
+
+  // Map nearby available drivers → their registered + online vehicle types,
+  // tracking distinct drivers per type for the "X nearby" count.
+  const availableVehicles = await DriverVehicle.find({
+    driverId: { $in: nearbyDriverIds },
+    isActive: true,
+    isOnline: true,
+  }).select("driverId vehicleTypeId");
+
+  const driversByType = new Map<string, Set<string>>();
+  for (const v of availableVehicles as any[]) {
+    const typeId = v.vehicleTypeId.toString();
+    if (!driversByType.has(typeId)) driversByType.set(typeId, new Set());
+    driversByType.get(typeId)!.add(v.driverId.toString());
+  }
+
+  const vehicleTypes = allVehicleTypes.filter((vt: any) =>
+    driversByType.has(vt._id.toString()),
+  );
+
+  // Calculate fare for each available vehicle type + apply promotion rules
   const fareEstimates = await Promise.all(vehicleTypes.map(async (vehicleType) => {
     const fare = helpers().calculateFare(
       routeInfo.distanceKm,
@@ -137,6 +187,7 @@ export const getAllFareEstimates = async (
       discount: ruleResult.discount,
       finalFare: ruleResult.finalFare,
       appliedRules: ruleResult.appliedRules,
+      availableDrivers: driversByType.get(vehicleType._id.toString())?.size ?? 0,
     };
   }));
 
@@ -320,11 +371,13 @@ export const createBooking = async (
 
   // Find nearby drivers and notify via Socket.io + MQTT bell + FCM push
   const io = req.app.get("io");
+  // Only notify drivers whose registered + online vehicle matches the
+  // requested vehicle type — a Bike driver must not receive a Sedan booking.
   const nearbyDrivers = await DriverLocationService.findNearbyDrivers(
     pickupLat,
     pickupLng,
     5, // 5km radius
-    undefined,
+    new Types.ObjectId(vehicleTypeId),
     "cab",
   );
 
@@ -600,6 +653,21 @@ export const cancelBooking = async (
     });
   }
 
+  // Clear the pending request from every driver that was offered this ride
+  // (while it was still SEARCHING) so the request card disappears from their
+  // app instantly. The assigned driver — if any — was already notified above.
+  if (io && Array.isArray(booking.notifiedDriverIds)) {
+    const assignedId = booking.driverId?.toString();
+    for (const driverId of booking.notifiedDriverIds) {
+      if (assignedId && driverId.toString() === assignedId) continue;
+      io.to(`driver_${driverId}`).emit("ride_cancelled", {
+        bookingId: booking._id,
+        cancelledBy: "USER",
+        reason,
+      });
+    }
+  }
+
   req.rData = { booking: updatedBooking };
   req.msg = "booking_cancelled";
   next();
@@ -732,14 +800,48 @@ export const getNearbyDrivers = async (
     "cab",
   );
 
-  req.rData = {
-    drivers: nearbyDrivers.map(({ driver, location }) => ({
+  // Resolve each available driver's vehicle image (vehicle type icon) so the
+  // map can render the real vehicle PNG instead of a generic marker.
+  const driverIds = nearbyDrivers.map((d) => d.driver._id);
+  const vehicles = await DriverVehicle.find({
+    driverId: { $in: driverIds },
+    isActive: true,
+    isOnline: true,
+  }).populate("vehicleTypeId", "image name");
+
+  const imageByDriver = new Map<string, string>();
+  for (const v of vehicles as any[]) {
+    const vt = v.vehicleTypeId;
+    if (vt && typeof vt === "object" && vt.image) {
+      imageByDriver.set(v.driverId.toString(), vt.image);
+    }
+  }
+
+  // "Get a cab in X mins" = nearest available driver's straight-line distance
+  // to the pickup ÷ an assumed average city speed (no extra Maps API cost).
+  const AVG_SPEED_KMH = 20;
+  let nearestKm = Infinity;
+
+  const drivers = nearbyDrivers.map(({ driver, location }) => {
+    const dLat = location?.latitude ?? 0;
+    const dLng = location?.longitude ?? 0;
+    const km = haversineKm(lat, lng, dLat, dLng);
+    if (km < nearestKm) nearestKm = km;
+    return {
       id: driver._id,
-      latitude: location?.latitude ?? 0,
-      longitude: location?.longitude ?? 0,
+      latitude: dLat,
+      longitude: dLng,
       heading: location?.heading ?? 0,
-    })),
-  };
+      vehicleImage: imageByDriver.get(driver._id.toString()) ?? "",
+    };
+  });
+
+  const etaMinutes =
+    drivers.length > 0 && Number.isFinite(nearestKm)
+      ? Math.max(1, Math.ceil((nearestKm / AVG_SPEED_KMH) * 60))
+      : null;
+
+  req.rData = { drivers, etaMinutes };
 
   req.msg = "success";
   next();
