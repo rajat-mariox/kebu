@@ -1,0 +1,48 @@
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.buildDir = "../build"
+subprojects {
+    project.buildDir = "${rootProject.buildDir}/${project.name}"
+}
+subprojects {
+    project.evaluationDependsOn(":app")
+}
+
+// Force a consistent JVM target (17) across all plugin subprojects so that
+// Java and Kotlin compile tasks don't mismatch (e.g. flutter_facebook_auth).
+// We set Java compatibility through the Android extension (AGP overrides any
+// values set directly on the JavaCompile tasks), reacting via plugins.withId
+// so it works regardless of subproject evaluation order.
+subprojects {
+    // The :app project configures Java 17 in its own build.gradle and is
+    // already evaluated/finalized here, so only touch plugin subprojects.
+    // We must run in afterEvaluate so we override compileOptions that a
+    // plugin sets in its own build.gradle (e.g. fluttertoast pins Java 11).
+    if (project.name != "app" && !project.state.executed) {
+        project.afterEvaluate {
+            if (project.hasProperty("android")) {
+                project.android {
+                    compileOptions {
+                        sourceCompatibility = JavaVersion.VERSION_17
+                        targetCompatibility = JavaVersion.VERSION_17
+                    }
+                }
+            }
+        }
+    }
+
+    tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+        kotlinOptions {
+            jvmTarget = "17"
+        }
+    }
+}
+
+tasks.register("clean", Delete) {
+    delete rootProject.buildDir
+}

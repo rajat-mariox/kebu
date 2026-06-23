@@ -4,11 +4,13 @@ import { Types } from "mongoose";
 import * as BookingService from "../services/booking.service";
 import * as DriverLocationService from "../services/driver-location.service";
 import * as DriverService from "../services/driver.service";
+import * as DriverVehicleService from "../services/driver-vehicle.service";
 import * as VehicleTypeService from "../services/vehicle-type.service";
 import * as MapsService from "../services/maps.service";
 import * as NotificationService from "../services/notification.service";
 import * as AutomationRuleService from "../services/automation-rule.service";
 import * as SubscriptionBenefitsService from "../services/subscription-benefits.service";
+import * as PaymentService from "../services/payment.service";
 import Offer from "../models/offer.model";
 import DriverVehicle from "../models/driver-vehicle.model";
 import helpers from "../utils/helpers";
@@ -223,6 +225,9 @@ export const createBooking = async (
     paymentMethod,
     scheduledAt,
     promoCode,
+    razorpay_order_id,
+    razorpay_payment_id,
+    razorpay_signature,
   } = req.body;
 
   // Check for active booking
@@ -328,6 +333,37 @@ export const createBooking = async (
     0,
   );
 
+  // Resolve payment up-front for online (UPI) bookings: the client pays via
+  // Razorpay BEFORE the ride is created, then sends the payment proof here.
+  // We only create the booking once the signature verifies. Cash bookings are
+  // created PENDING and settled when the driver collects on completion.
+  const method = paymentMethod || "CASH";
+  let paymentStatus: "PENDING" | "PAID" = "PENDING";
+
+  if (method === "UPI") {
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      req.rCode = 0;
+      req.msg = "payment_required";
+      req.rData = { error: "Online payment is required before booking" };
+      return next();
+    }
+
+    const isValid = PaymentService.verifyPayment({
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature,
+    });
+
+    if (!isValid) {
+      req.rCode = 0;
+      req.msg = "payment_verification_failed";
+      req.rData = { error: "Payment could not be verified" };
+      return next();
+    }
+
+    paymentStatus = "PAID";
+  }
+
   // Generate ride OTP
   const rideOtp = helpers().generateOTP(4).toString();
 
@@ -356,7 +392,8 @@ export const createBooking = async (
       subscriptionDiscount > 0 ? benefits?.planName : undefined,
     finalFare,
     promoCode: appliedPromo,
-    paymentMethod: paymentMethod || "CASH",
+    paymentMethod: method,
+    paymentStatus,
     status: "SEARCHING",
     otp: rideOtp,
     scheduledAt: scheduledAt ? new Date(scheduledAt) : undefined,
@@ -407,8 +444,13 @@ export const createBooking = async (
     drop: booking.drop,
     fare: booking.finalFare,
     finalFare: booking.finalFare,
+    // Surge component of the fare — shown as the "+ ₹x" incentive badge on
+    // the driver's take-booking earnings card. Omitted (0) for non-surge rides.
+    surgeFare: booking.surgeFare ?? 0,
     distanceKm: booking.distanceKm,
     durationMin: booking.durationMin,
+    // Scheduled pickup time (null for immediate rides → driver app shows "now").
+    scheduledAt: booking.scheduledAt,
     paymentMethod: booking.paymentMethod,
     user: userBlock,
     userId: userBlock,
@@ -552,7 +594,21 @@ export const getActiveBooking = async (
 
   const booking = await BookingService.getActiveUserBooking(userId);
 
-  req.rData = { booking };
+  // Attach the assigned driver's vehicle registration number so a resumed
+  // session shows the real vehicle plate (the booking itself only stores the
+  // vehicle type, not the specific vehicle). Name/image come from the
+  // populated vehicleTypeId already.
+  let responseBooking: any = booking;
+  if (booking && (booking as any).driverId) {
+    const driverId = (booking as any).driverId?._id ?? (booking as any).driverId;
+    const activeVehicle =
+      await DriverVehicleService.getActiveDriverVehicle(driverId);
+    responseBooking = (booking as any).toObject();
+    responseBooking.vehicleNumber =
+      (activeVehicle as any)?.registrationNumber ?? "";
+  }
+
+  req.rData = { booking: responseBooking };
   req.msg = "success";
   next();
 };
@@ -810,10 +866,12 @@ export const getNearbyDrivers = async (
   }).populate("vehicleTypeId", "image name");
 
   const imageByDriver = new Map<string, string>();
+  const typeByDriver = new Map<string, string>();
   for (const v of vehicles as any[]) {
     const vt = v.vehicleTypeId;
-    if (vt && typeof vt === "object" && vt.image) {
-      imageByDriver.set(v.driverId.toString(), vt.image);
+    if (vt && typeof vt === "object") {
+      if (vt.image) imageByDriver.set(v.driverId.toString(), vt.image);
+      if (vt.name) typeByDriver.set(v.driverId.toString(), vt.name);
     }
   }
 
@@ -833,6 +891,7 @@ export const getNearbyDrivers = async (
       longitude: dLng,
       heading: location?.heading ?? 0,
       vehicleImage: imageByDriver.get(driver._id.toString()) ?? "",
+      vehicleType: typeByDriver.get(driver._id.toString()) ?? "",
     };
   });
 

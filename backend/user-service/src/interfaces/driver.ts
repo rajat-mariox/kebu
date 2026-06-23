@@ -29,6 +29,13 @@ export interface IDriver {
   // the ServiceCategory ids this vendor can service (plumbing, AC repair, deep cleaning, etc.)
   householdCategories?: Types.ObjectId[];
 
+  // Household partner "Personal Details" onboarding (backend-driven form).
+  totalExperience?: string;
+  pastWorkExperience?: string;
+  availability?: string;
+  interestedInPaidLeads?: string;
+  spokenLanguages?: string[];
+
   city: string;
   state: string;
   address?: string;

@@ -211,12 +211,41 @@ export const rateBooking = async (
     { new: true }
   );
 
-  // Update driver rating
-  // if (booking && booking.driverId) {
-  //   await updateDriverRating(booking.driverId, rating);
-  // }
+  // Reflect the new rating on the driver's profile by recomputing their
+  // average across all rated bookings.
+  if (booking && booking.driverId) {
+    await recomputeDriverRating(booking.driverId);
+  }
 
   return booking;
+};
+
+/**
+ * Recompute a driver's average rating from all their rated bookings and
+ * persist it on the driver record (so it shows on the driver profile).
+ */
+export const recomputeDriverRating = async (
+  driverId: string | Types.ObjectId
+) => {
+  const id = new Types.ObjectId(String(driverId));
+  const result = await Booking.aggregate([
+    { $match: { driverId: id, rating: { $gt: 0 } } },
+    {
+      $group: {
+        _id: "$driverId",
+        avg: { $avg: "$rating" },
+        count: { $sum: 1 },
+      },
+    },
+  ]);
+
+  const avg = result[0]?.avg ?? 0;
+  // Round to 1 decimal place (e.g. 4.3).
+  const rounded = Math.round(avg * 10) / 10;
+
+  const Driver = (await import("../models/driver.model")).default;
+  await Driver.findByIdAndUpdate(id, { rating: rounded });
+  return rounded;
 };
 
 /**

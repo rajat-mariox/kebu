@@ -16,6 +16,7 @@ import Wallet from "./wallet.model";
 import WalletTransaction from "./wallet-transaction.model";
 import RewardTransaction from "./reward-transaction.model";
 import UserGST from "./user-gst.model";
+import HouseholdOnboardingConfig from "./household-onboarding-config.model";
 
 mongoose.set("strictQuery", true);
 
@@ -71,6 +72,7 @@ export const models = {
   WalletTransaction,
   RewardTransaction,
   UserGST,
+  HouseholdOnboardingConfig,
 } as const;
 
 export default connectDB;
