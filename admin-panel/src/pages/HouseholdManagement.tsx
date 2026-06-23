@@ -11,9 +11,7 @@ import {
   X,
   Zap,
   Ban,
-  BarChart3,
   Users,
-  Clock,
 } from "lucide-react";
 import {
   serviceHoursService,
