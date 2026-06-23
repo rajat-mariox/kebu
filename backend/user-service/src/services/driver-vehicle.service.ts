@@ -79,6 +79,26 @@ export const toggleVehicleOnlineStatus = async (
 };
 
 /**
+ * Bring all of a driver's active vehicles online/offline.
+ *
+ * The driver-level availability toggle only flips `Driver.isOnline`, but the
+ * booking matcher (`findNearbyDrivers` + fare estimates) additionally requires
+ * an active + online `DriverVehicle` matching the requested vehicle type.
+ * Without syncing this flag the driver's car shows on the customer map (which
+ * only needs `Driver.isOnline` + a fresh location) yet no ride ever matches —
+ * the rider sees "no vehicle available". Keep the two flags in lock-step.
+ */
+export const setDriverVehiclesOnline = async (
+  driverId: Types.ObjectId,
+  isOnline: boolean
+) => {
+  return await DriverVehicle.updateMany(
+    { driverId, isActive: true, isDeleted: false },
+    { $set: { isOnline } }
+  );
+};
+
+/**
  * Soft delete driver vehicle
  */
 export const softDeleteDriverVehicle = async (

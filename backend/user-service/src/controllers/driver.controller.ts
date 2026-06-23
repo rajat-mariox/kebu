@@ -14,6 +14,9 @@ import VehicleType from "../models/vehicle-type.model";
 import VehicleCategory from "../models/vehicle-category.model";
 import DriverVehicle from "../models/driver-vehicle.model";
 import ServiceCategory from "../models/service-category.model";
+import HouseholdOnboardingConfig, {
+  DEFAULT_HOUSEHOLD_PERSONAL_INFO_FIELDS,
+} from "../models/household-onboarding-config.model";
 import * as CommissionService from "../services/commission.service";
 import * as MapsService from "../services/maps.service";
 import * as NotificationService from "../services/notification.service";
@@ -197,6 +200,12 @@ export const toggleOnlineStatus = async (
 
   // Update driver status
   await DriverService.updateDriver(driverId, update);
+
+  // Keep the driver's vehicle(s) online flag in lock-step with availability.
+  // The booking matcher needs an active + online DriverVehicle, not just
+  // Driver.isOnline — otherwise the car shows on the customer map but every
+  // ride request comes back "no vehicle available".
+  await DriverVehicleService.setDriverVehiclesOnline(driverId, isOnline);
 
   // Update location if going online
   if (isOnline && latitude && longitude) {
@@ -666,7 +675,13 @@ export const updateRideStatus = async (
       COMPLETED: "ride_completed",
     };
 
-    io.to(`user_${updatedBooking.userId}`).emit(eventMap[status], {
+    // `updatedBooking.userId` is populated (a document), so interpolating it
+    // directly would target the bogus room "user_[object Object]" and the
+    // customer would never receive the event in real time — they'd only catch
+    // up on the next 10s poll. Resolve the actual id for the room.
+    const targetUserId =
+      (updatedBooking as any).userId?._id ?? (updatedBooking as any).userId;
+    io.to(`user_${targetUserId}`).emit(eventMap[status], {
       booking: updatedBooking,
     });
   }
@@ -1293,6 +1308,148 @@ export const uploadProfileImage = async (
 };
 
 // ============ CLEANING VENDOR ONBOARDING ============
+
+/**
+ * Household partner onboarding — "Personal Details" step.
+ *
+ * Returns the fully backend-driven form schema (field list, types, validation
+ * and dropdown options) the partner app renders dynamically, together with the
+ * step indicator and any already-saved values to pre-fill. The field set lives
+ * in the HouseholdOnboardingConfig collection and is seeded with sensible
+ * defaults the first time it is requested while empty.
+ */
+export const getHouseholdPersonalInfo = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  console.log("DriverController => getHouseholdPersonalInfo");
+
+  const driverId = (req as any).driverId;
+
+  // Seed defaults on first run so the form works without any admin setup.
+  const count = await HouseholdOnboardingConfig.countDocuments();
+  if (count === 0) {
+    await HouseholdOnboardingConfig.insertMany(
+      DEFAULT_HOUSEHOLD_PERSONAL_INFO_FIELDS,
+    );
+  }
+
+  const configs = await HouseholdOnboardingConfig.find({ isActive: true })
+    .select("-__v -createdAt -updatedAt")
+    .sort({ displayOrder: 1 });
+
+  const fields = configs.map((c) => ({
+    key: c.key,
+    label: c.label,
+    type: c.type,
+    placeholder: c.placeholder,
+    keyboard: c.keyboard,
+    required: c.required,
+    readOnly: c.readOnly,
+    options: c.options,
+  }));
+
+  const driver = await DriverService.getDriverById(driverId);
+
+  const prefill: Record<string, any> = {
+    fullName: driver?.fullName || "",
+    email: driver?.email || "",
+    mobileNumber: driver?.mobileNumber || "",
+    countryCode: driver?.countryCode || "+91",
+    totalExperience: driver?.totalExperience || "",
+    pastWorkExperience: driver?.pastWorkExperience || "",
+    availability: driver?.availability || "",
+    interestedInPaidLeads: driver?.interestedInPaidLeads || "",
+    spokenLanguage: driver?.spokenLanguages || [],
+  };
+
+  req.rData = {
+    title: "Personal Details",
+    steps: [
+      { key: "personal", label: "Personal Details" },
+      { key: "address", label: "Address" },
+      { key: "work", label: "Work Details" },
+      { key: "bank", label: "Bank Details" },
+    ],
+    currentStep: 0,
+    fields,
+    prefill,
+  };
+  req.msg = "success";
+  next();
+};
+
+/**
+ * Household partner onboarding — save the "Personal Details" step. Validates
+ * against the active backend-driven field config (so required-ness stays in
+ * sync with what the app rendered) and persists onto the driver record.
+ */
+export const saveHouseholdPersonalInfo = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  console.log("DriverController => saveHouseholdPersonalInfo");
+
+  const driverId = (req as any).driverId;
+  const body = req.body || {};
+
+  const configs = await HouseholdOnboardingConfig.find({ isActive: true }).sort({
+    displayOrder: 1,
+  });
+
+  // Validate required fields based on the live config.
+  for (const cfg of configs) {
+    if (cfg.readOnly) continue;
+    if (!cfg.required) continue;
+    const val = body[cfg.key];
+    const isEmpty =
+      val === undefined ||
+      val === null ||
+      (typeof val === "string" && val.trim() === "") ||
+      (Array.isArray(val) && val.length === 0);
+    if (isEmpty) {
+      return res
+        .status(400)
+        .json({ code: 0, message: `${cfg.label} is required.`, data: {} });
+    }
+  }
+
+  const name = (body.fullName ?? "").toString().trim();
+  const email = (body.email ?? "").toString().trim();
+
+  const nameErr = V.validateName(name);
+  if (nameErr) return res.status(400).json({ code: 0, message: nameErr, data: {} });
+  const emailErr = V.validateEmail(email);
+  if (emailErr) return res.status(400).json({ code: 0, message: emailErr, data: {} });
+
+  const spoken = Array.isArray(body.spokenLanguage)
+    ? body.spokenLanguage.map((s: any) => String(s).trim()).filter(Boolean)
+    : typeof body.spokenLanguage === "string" && body.spokenLanguage.trim()
+      ? [body.spokenLanguage.trim()]
+      : [];
+
+  const driver = await DriverService.getDriverById(driverId);
+
+  const updateData: Partial<IDriver> = {
+    fullName: name,
+    email,
+    totalExperience: (body.totalExperience ?? "").toString().trim(),
+    pastWorkExperience: (body.pastWorkExperience ?? "").toString().trim(),
+    availability: (body.availability ?? "").toString().trim(),
+    interestedInPaidLeads: (body.interestedInPaidLeads ?? "").toString().trim(),
+    spokenLanguages: spoken,
+    serviceType: "cleaning",
+    onboardingStep: Math.max(1, driver?.onboardingStep || 0),
+  };
+
+  await DriverService.updateDriver(driverId, updateData);
+
+  req.rData = { saved: true, onboardingStep: updateData.onboardingStep };
+  req.msg = "success";
+  next();
+};
 
 /**
  * Get household service category tree (parents + their sub-categories).

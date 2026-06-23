@@ -38,6 +38,9 @@ export const getOffers = async (
     isDeleted: false,
     startDate: { $lte: now },
     endDate: { $gte: now },
+    // Scratch-card coupons are user-specific redemption codes, not public
+    // banners — keep them out of the Offers listing.
+    tag: { $ne: "SCRATCH" },
   };
 
   if (type && type !== "ALL") {

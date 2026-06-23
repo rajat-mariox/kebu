@@ -61,6 +61,28 @@ const DriverSchema = new Schema<IDriver>(
       index: true,
     },
 
+    // ── Household partner "Personal Details" onboarding (backend-driven) ──
+    totalExperience: {
+      type: String,
+      default: "",
+    },
+    pastWorkExperience: {
+      type: String,
+      default: "",
+    },
+    availability: {
+      type: String,
+      default: "",
+    },
+    interestedInPaidLeads: {
+      type: String,
+      default: "",
+    },
+    spokenLanguages: {
+      type: [String],
+      default: [],
+    },
+
     city: {
       type: String,
       default: "",

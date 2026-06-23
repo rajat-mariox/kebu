@@ -10,9 +10,11 @@ import * as DriverLocationService from "../services/driver-location.service";
 import * as BookingService from "../services/booking.service";
 import * as HouseholdService from "../services/household.service";
 import * as DriverService from "../services/driver.service";
+import * as DriverVehicleService from "../services/driver-vehicle.service";
 import * as NotificationService from "../services/notification.service";
 import * as ChatService from "../services/chat.service";
 import ScratchCard from "../models/scratch-card.model";
+import Offer from "../models/offer.model";
 import {
   publishDriverLocation,
   publishBookingUpdate,
@@ -28,6 +30,20 @@ const connectedUsers = new Map<string, SocketUser>();
 const connectedDrivers = new Map<string, SocketUser>();
 const otpAttempts = new Map<string, number>();
 const MAX_OTP_ATTEMPTS = 5;
+
+/**
+ * Resolves the customer's socket room id from a booking's `userId` field.
+ *
+ * Booking queries `.populate("userId", ...)`, so `booking.userId` is a Mongoose
+ * document, not an ObjectId. Interpolating it directly (`user_${booking.userId}`)
+ * yields the literal "user_[object Object]" — a room nobody is in, so the event
+ * is silently dropped and the customer only catches up via the 10s poll. Always
+ * route through this helper so real-time events land in the right room.
+ */
+const userRoom = (userId: any): string => {
+  const id = userId?._id ?? userId;
+  return `user_${id}`;
+};
 
 export const initializeSocket = async (
   httpServer: HTTPServer,
@@ -108,6 +124,9 @@ export const initializeSocket = async (
         const driverId = new Types.ObjectId(userId);
 
         await DriverService.updateDriver(driverId, { isOnline: true });
+        // Sync vehicle availability — the booking matcher requires an active +
+        // online DriverVehicle, not just Driver.isOnline (see service comment).
+        await DriverVehicleService.setDriverVehiclesOnline(driverId, true);
 
         if (latitude != null && longitude != null) {
           await DriverLocationService.updateDriverLocation(driverId, latitude, longitude);
@@ -122,6 +141,15 @@ export const initializeSocket = async (
             driverDoc.status === "approved" &&
             !driverDoc.currentBookingId
           ) {
+            // Include the driver's vehicle type name so the customer map shows
+            // the correct vehicle marker (bike/auto/car) the instant they come
+            // online, instead of defaulting to a car until the next poll.
+            const activeVehicle =
+              await DriverVehicleService.getActiveDriverVehicle(driverId);
+            const vt = (activeVehicle as any)?.vehicleTypeId;
+            const vehicleType =
+              vt && typeof vt === "object" ? vt.name ?? "" : "";
+
             io.to("customers").emit("driver_status_changed", {
               driverId: userId,
               isOnline: true,
@@ -129,6 +157,7 @@ export const initializeSocket = async (
               longitude,
               heading: 0,
               serviceType: driverDoc.serviceType,
+              vehicleType,
             });
           }
         } else {
@@ -148,6 +177,7 @@ export const initializeSocket = async (
       try {
         const driverId = new Types.ObjectId(userId);
         await DriverService.updateDriver(driverId, { isOnline: false });
+        await DriverVehicleService.setDriverVehiclesOnline(driverId, false);
         // Real-time fan-out: drop this driver's marker from every customer map.
         io.to("customers").emit("driver_status_changed", {
           driverId: userId,
@@ -187,7 +217,7 @@ export const initializeSocket = async (
           );
 
           // Socket.io → user
-          io.to(`user_${activeBooking.userId}`).emit("driver_location", locationPayload);
+          io.to(userRoom(activeBooking.userId)).emit("driver_location", locationPayload);
 
           // MQTT → anyone listening on driver/location/{driverId}
           publishDriverLocation(userId, { latitude, longitude, heading, speed, bookingId: activeBooking._id?.toString() });
@@ -200,7 +230,7 @@ export const initializeSocket = async (
         const activeServiceBooking =
           await HouseholdService.getActiveProviderServiceBooking(driverId);
         if (activeServiceBooking) {
-          io.to(`user_${activeServiceBooking.userId}`).emit("provider_location", {
+          io.to(userRoom(activeServiceBooking.userId)).emit("provider_location", {
             bookingId: activeServiceBooking._id,
             latitude,
             longitude,
@@ -233,15 +263,29 @@ export const initializeSocket = async (
         const driver = await DriverService.getDriverById(driverId);
         const driverLocation = await DriverLocationService.getDriverLocation(driverId);
 
+        // Resolve the driver's actual vehicle so the customer's live-tracking
+        // card shows the real vehicle (name/number/image) instead of static
+        // placeholder data — e.g. a Bike booking must not show a car.
+        const activeVehicle =
+          await DriverVehicleService.getActiveDriverVehicle(driverId);
+        const vt = (activeVehicle as any)?.vehicleTypeId;
+
         const driverInfo = {
           _id: driver?._id,
           fullName: driver?.fullName,
           mobileNumber: driver?.mobileNumber,
           rating: driver?.rating,
+          totalRides: (driver as any)?.totalRides ?? 0,
+          profileImage: (driver as any)?.profileImage ?? "",
+          vehicleName:
+            vt && typeof vt === "object" ? vt.name ?? "" : "",
+          vehicleImage:
+            vt && typeof vt === "object" ? vt.image ?? "" : "",
+          vehicleNumber: (activeVehicle as any)?.registrationNumber ?? "",
         };
 
         // Socket.io → user
-        io.to(`user_${updatedBooking.userId}`).emit("ride_accepted", {
+        io.to(userRoom(updatedBooking.userId)).emit("ride_accepted", {
           booking: updatedBooking,
           driver: driverInfo,
           driverLocation,
@@ -301,7 +345,7 @@ export const initializeSocket = async (
         const updatedBooking = await BookingService.updateBookingStatus(bookingId, "DRIVER_ARRIVED");
 
         if (updatedBooking) {
-          io.to(`user_${updatedBooking.userId}`).emit("driver_arrived", { booking: updatedBooking });
+          io.to(userRoom(updatedBooking.userId)).emit("driver_arrived", { booking: updatedBooking });
           publishBookingUpdate(bookingId, "driver_arrived", {});
 
           // FCM push → user + persist
@@ -356,7 +400,7 @@ export const initializeSocket = async (
 
         const updatedBooking = await BookingService.updateBookingStatus(bookingId, "IN_PROGRESS");
 
-        io.to(`user_${booking.userId}`).emit("ride_started", { booking: updatedBooking });
+        io.to(userRoom(booking.userId)).emit("ride_started", { booking: updatedBooking });
         publishBookingUpdate(bookingId, "ride_started", {});
 
         // FCM push → user + persist
@@ -412,10 +456,20 @@ export const initializeSocket = async (
 
         const updatedBooking = await BookingService.updateBookingStatus(bookingId, "COMPLETED");
 
+        // Cash rides are paid to the driver on completion — mark them PAID now.
+        // (Online/UPI rides were already PAID up-front when the booking was made.)
+        if (
+          (updatedBooking as any)?.paymentMethod === "CASH" &&
+          (updatedBooking as any)?.paymentStatus !== "PAID"
+        ) {
+          await BookingService.updateBooking(bookingId, { paymentStatus: "PAID" });
+          (updatedBooking as any).paymentStatus = "PAID";
+        }
+
         await DriverService.updateDriver(driverId, { currentBookingId: undefined });
 
         if (updatedBooking) {
-          io.to(`user_${updatedBooking.userId}`).emit("ride_completed", { booking: updatedBooking });
+          io.to(userRoom(updatedBooking.userId)).emit("ride_completed", { booking: updatedBooking });
           publishBookingUpdate(bookingId, "ride_completed", { fare: (updatedBooking as any).finalFare });
 
           // FCM push → user + persist
@@ -482,6 +536,29 @@ export const initializeSocket = async (
                 sourceType: "RIDE_COMPLETION",
                 sourceRef: bookingId,
               });
+              // For a discount coupon, also create a matching (user-specific,
+              // single-use) Offer so the code is redeemable via the promo flow.
+              // Tagged "SCRATCH" so it stays out of the public Offers banner.
+              if (rewardType === "DISCOUNT_COUPON" && couponCode) {
+                await Offer.create({
+                  title: "Scratch Card Discount",
+                  description: `${rewardValue}% off your next ride`,
+                  code: couponCode,
+                  type: "PERCENTAGE",
+                  value: rewardValue,
+                  applicableOn: "CAB",
+                  section: "just_for_you",
+                  targetService: "booking",
+                  startDate: new Date(),
+                  endDate: expiresAt,
+                  usageLimit: 1,
+                  perUserLimit: 1,
+                  isForAllUsers: false,
+                  targetUserIds: [userIdForCard],
+                  tag: "SCRATCH",
+                  isActive: true,
+                });
+              }
               if (user?.fcmToken) {
                 await NotificationService.sendRideStatusPush(
                   user.fcmToken,
@@ -519,7 +596,7 @@ export const initializeSocket = async (
         await DriverService.updateDriver(driverId, { currentBookingId: undefined });
 
         if (updatedBooking) {
-          io.to(`user_${updatedBooking.userId}`).emit("ride_cancelled", {
+          io.to(userRoom(updatedBooking.userId)).emit("ride_cancelled", {
             booking: updatedBooking,
             cancelledBy: "DRIVER",
             reason,
@@ -644,9 +721,10 @@ export const initializeSocket = async (
 
         if (booking) {
           if (userType === "user" && booking.driverId) {
-            io.to(`driver_${booking.driverId}`).emit("sos_alert", { bookingId, message: "User triggered SOS" });
+            const driverId = (booking.driverId as any)?._id ?? booking.driverId;
+            io.to(`driver_${driverId}`).emit("sos_alert", { bookingId, message: "User triggered SOS" });
           } else if (userType === "driver") {
-            io.to(`user_${booking.userId}`).emit("sos_alert", { bookingId, message: "Driver triggered SOS" });
+            io.to(userRoom(booking.userId)).emit("sos_alert", { bookingId, message: "Driver triggered SOS" });
           }
 
           publishBookingUpdate(bookingId, "sos_emergency", { userId, userType, latitude, longitude });
@@ -670,6 +748,7 @@ export const initializeSocket = async (
         try {
           const driverId = new Types.ObjectId(userId);
           await DriverService.updateDriver(driverId, { isOnline: false });
+          await DriverVehicleService.setDriverVehiclesOnline(driverId, false);
           // Driver dropped connection → remove their marker from customer maps.
           io.to("customers").emit("driver_status_changed", {
             driverId: userId,

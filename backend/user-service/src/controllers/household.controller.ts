@@ -669,6 +669,44 @@ export const getServicePackages = async (
     packages = await ServicePackage.find(packageQuery).sort({ displayOrder: 1 });
   }
 
+  // No persisted packages and no category to seed against (e.g. the prebook
+  // flow opens the "Choose service details" screen without a categoryId) —
+  // return sensible default durations so "Select Duration" is never empty.
+  if (packages.length === 0) {
+    packages = [
+      {
+        name: "1 hr",
+        durationMinutes: 60,
+        originalPrice: 199,
+        discountedPrice: 99,
+        discountPercentage: 50,
+        isPopular: false,
+        isAvailable: true,
+        displayOrder: 1,
+      },
+      {
+        name: "1.5 hr",
+        durationMinutes: 90,
+        originalPrice: 255,
+        discountedPrice: 149,
+        discountPercentage: 41,
+        isPopular: true,
+        isAvailable: true,
+        displayOrder: 2,
+      },
+      {
+        name: "2 hr",
+        durationMinutes: 120,
+        originalPrice: 399,
+        discountedPrice: 200,
+        discountPercentage: 50,
+        isPopular: false,
+        isAvailable: true,
+        displayOrder: 3,
+      },
+    ];
+  }
+
   // Compute lowest hourly price across all services in the category — the
   // mobile screen renders this as the headline "starting from ₹X" card.
   let lowestHourly: {
@@ -770,7 +808,7 @@ export const getServicePackages = async (
   };
 
   const packagesWithAvailability = packages.map((pkg: any) => {
-    const obj = pkg.toObject();
+    const obj = typeof pkg.toObject === "function" ? pkg.toObject() : pkg;
     const applied = pickOfferForPackage(obj);
     return {
       ...obj,
@@ -809,9 +847,16 @@ export const getAvailableTimeSlots = async (
     BlockedSlot,
   } = require("../models/service-time-slot.model");
 
+  // categoryId may be "default" / absent when the prebook flow opens this
+  // screen without a specific category — guard against an invalid ObjectId.
+  const hasValidCategory =
+    !!categoryId && Types.ObjectId.isValid(categoryId) && categoryId !== "default";
+
   // Get time slot configuration
   let slotConfigs = await TimeSlotConfig.find({
-    $or: [{ categoryId: new Types.ObjectId(categoryId) }, { categoryId: null }],
+    $or: hasValidCategory
+      ? [{ categoryId: new Types.ObjectId(categoryId) }, { categoryId: null }]
+      : [{ categoryId: null }],
     isActive: true,
   });
 
@@ -886,7 +931,7 @@ export const getAvailableTimeSlots = async (
 
   // Get blocked slots for the date
   let blockedSlots: string[] = [];
-  if (date) {
+  if (date && hasValidCategory) {
     const blockedData = await BlockedSlot.findOne({
       date: new Date(date as string),
       categoryId: new Types.ObjectId(categoryId),
@@ -995,11 +1040,18 @@ export const getAvailableDates = async (
 
   const { BlockedSlot } = require("../models/service-time-slot.model");
 
+  // categoryId may be "default" / absent — only filter blocked dates by
+  // category when it's a valid ObjectId, otherwise treat all dates as open.
+  const hasValidCategory =
+    !!categoryId && Types.ObjectId.isValid(categoryId) && categoryId !== "default";
+
   // Get fully blocked dates
-  const blockedDates = await BlockedSlot.find({
-    categoryId: new Types.ObjectId(categoryId),
-    date: { $gte: start, $lte: end },
-  }).select("date blockedSlots");
+  const blockedDates = hasValidCategory
+    ? await BlockedSlot.find({
+        categoryId: new Types.ObjectId(categoryId),
+        date: { $gte: start, $lte: end },
+      }).select("date blockedSlots")
+    : [];
 
   // Generate date availability
   const dates: any[] = [];

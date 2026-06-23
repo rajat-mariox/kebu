@@ -225,6 +225,27 @@ driverRouter.post(
 );
 
 /**
+ * Onboarding (household partner) - fetch backend-driven "Personal Details"
+ * form schema (fields, dropdown options) + any saved values.
+ */
+driverRouter.get(
+  "/onboarding/household/personal-info",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(DriverController.getHouseholdPersonalInfo),
+  ResponseMiddleware,
+);
+
+/**
+ * Onboarding (household partner) - save the "Personal Details" step.
+ */
+driverRouter.post(
+  "/onboarding/household/personal-info",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(DriverController.saveHouseholdPersonalInfo),
+  ResponseMiddleware,
+);
+
+/**
  * Onboarding (cleaning vendor) - fetch service category tree
  */
 driverRouter.get(
