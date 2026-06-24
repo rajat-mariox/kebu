@@ -24,6 +24,17 @@ class DriverApiService {
     );
   }
 
+  /// Household (cleaning) partner home dashboard — backend-driven aggregate of
+  /// stats, monthly revenue chart, booking tabs and reviews.
+  static Future<DriverApiResult> getHouseholdDashboard() async {
+    final response = await ApiClient.get('/driver/app/household/dashboard');
+    return DriverApiResult(
+      success: response.success,
+      message: response.message ?? '',
+      data: response.data,
+    );
+  }
+
   static Future<DriverApiResult> toggleStatus() async {
     final response = await ApiClient.put('/driver/app/status');
     return DriverApiResult(

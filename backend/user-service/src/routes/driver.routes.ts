@@ -246,6 +246,80 @@ driverRouter.post(
 );
 
 /**
+ * Onboarding (household partner) - fetch backend-driven "Address" form schema
+ * (current + permanent address sections) + any saved values.
+ */
+driverRouter.get(
+  "/onboarding/household/address",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(DriverController.getHouseholdAddress),
+  ResponseMiddleware,
+);
+
+/**
+ * Onboarding (household partner) - save the "Address" step.
+ */
+driverRouter.post(
+  "/onboarding/household/address",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(DriverController.saveHouseholdAddress),
+  ResponseMiddleware,
+);
+
+/**
+ * Onboarding (household partner) - fetch backend-driven "Work Details" form
+ * schema + the live service category tree (for cascading dropdowns).
+ */
+driverRouter.get(
+  "/onboarding/household/work-details",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(DriverController.getHouseholdWorkDetails),
+  ResponseMiddleware,
+);
+
+/**
+ * Onboarding (household partner) - save the "Work Details" step.
+ */
+driverRouter.post(
+  "/onboarding/household/work-details",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(DriverController.saveHouseholdWorkDetails),
+  ResponseMiddleware,
+);
+
+/**
+ * Household partner home/dashboard - backend-driven aggregate (stats, monthly
+ * revenue chart, booking tabs, reviews).
+ */
+driverRouter.get(
+  "/household/dashboard",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(DriverController.getHouseholdDashboard),
+  ResponseMiddleware,
+);
+
+/**
+ * Onboarding (household partner) - fetch backend-driven "Bank Details" form
+ * schema (final step) + any saved values.
+ */
+driverRouter.get(
+  "/onboarding/household/bank-details",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(DriverController.getHouseholdBankDetails),
+  ResponseMiddleware,
+);
+
+/**
+ * Onboarding (household partner) - save the "Bank Details" step (final step).
+ */
+driverRouter.post(
+  "/onboarding/household/bank-details",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(DriverController.saveHouseholdBankDetails),
+  ResponseMiddleware,
+);
+
+/**
  * Onboarding (cleaning vendor) - fetch service category tree
  */
 driverRouter.get(

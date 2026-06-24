@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart' show Factory;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
@@ -28,11 +29,26 @@ class GoogleMapWidget extends StatefulWidget {
   /// car marker so it points the way it's actually moving while tracking.
   final double? driverHeading;
 
-  /// Live-tracking mode: keep the camera following the driver as it approaches
-  /// the pickup. On each driver-location update the camera smoothly re-frames
-  /// the driver together with the pickup so the customer always sees the gap
+  /// Live-tracking mode: keep the camera following the driver as it moves. On
+  /// each driver-location update the camera smoothly re-frames the driver
+  /// together with the follow target so the customer always sees the gap
   /// closing in real time. Throttled internally to ignore GPS jitter.
   final bool followDriver;
+
+  /// Point the follow-camera frames the driver against. When set (and non-zero)
+  /// the camera fits the driver + this target — used to track the car to the
+  /// **drop** once the ride is in progress. Falls back to the pickup when null,
+  /// so the approach-to-pickup phase keeps its existing behaviour.
+  final double? followTargetLat;
+  final double? followTargetLng;
+
+  /// Turn-by-turn navigation camera (Google Maps "Navigation SDK" look on the
+  /// Maps SDK): instead of a flat top-down box framing driver + target, keep a
+  /// close, tilted (3D) view centred on the driver and rotated so the road the
+  /// car is travelling points "up". The driver marker becomes a flat icon that
+  /// rotates with the live heading. Requires [followDriver]; falls back to the
+  /// bounds framing when the driver heading / target isn't known yet.
+  final bool navigationMode;
 
   final bool interactive;
   final List<Map<String, dynamic>>? nearbyVehicles;
@@ -87,6 +103,9 @@ class GoogleMapWidget extends StatefulWidget {
     this.driverLng,
     this.driverHeading,
     this.followDriver = false,
+    this.followTargetLat,
+    this.followTargetLng,
+    this.navigationMode = false,
     this.interactive = false,
     this.nearbyVehicles,
     this.driverVehicleType,
@@ -134,8 +153,20 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     return 'assets/economy_car.png';
   }
 
-  static double _widthForAsset(String asset) =>
-      asset == 'assets/bike.png' ? 34 : 44;
+  // Figma map-pin assets shared with the driver app (copied into this app's
+  // assets/booking_buzzer): the customer pickup pin and the destination pin
+  // used on the live-tracking map.
+  static const String _pickupPinAsset =
+      'assets/booking_buzzer/pickup_person_marker.png';
+  static const String _dropPinAsset =
+      'assets/booking_buzzer/destination_pin.png';
+
+  static double _widthForAsset(String asset) {
+    if (asset == 'assets/bike.png') return 34;
+    if (asset == _pickupPinAsset) return 40;
+    if (asset == _dropPinAsset) return 38;
+    return 44;
+  }
 
   BitmapDescriptor? _iconFor(String? type) => _iconCache[_assetForType(type)];
 
@@ -212,10 +243,11 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     }
   }
 
-  /// Smoothly re-frames the camera on the moving driver. When the pickup is
-  /// known, fits both the driver and the pickup in view so the camera
-  /// naturally zooms in as the vehicle gets closer; otherwise just centres on
-  /// the driver. Ignores moves under ~20 m so GPS jitter doesn't jiggle the map.
+  /// Smoothly re-frames the camera on the moving driver. Fits both the driver
+  /// and the follow target (the drop while the ride is in progress, otherwise
+  /// the pickup) so the camera naturally zooms in as the gap closes — Uber
+  /// style. Falls back to centring on the driver when no target is known.
+  /// Ignores moves under ~20 m so GPS jitter doesn't jiggle the map.
   Future<void> _followDriver() async {
     if (!_controller.isCompleted) return;
     final dLat = widget.driverLat!, dLng = widget.driverLng!;
@@ -230,12 +262,49 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     _lastFollowTarget = LatLng(dLat, dLng);
 
     final controller = await _controller.future;
-    final pLat = widget.pickupLat, pLng = widget.pickupLng;
+    // Frame against the explicit follow target (drop) when given, otherwise
+    // the pickup.
+    final hasFollowTarget = widget.followTargetLat != null &&
+        widget.followTargetLng != null &&
+        widget.followTargetLat != 0 &&
+        widget.followTargetLng != 0;
+    final tLat = hasFollowTarget ? widget.followTargetLat : widget.pickupLat;
+    final tLng = hasFollowTarget ? widget.followTargetLng : widget.pickupLng;
 
-    if (pLat != null && pLng != null && pLat != 0 && pLng != 0) {
+    // Turn-by-turn navigation camera: close, tilted, and rotated so the map
+    // turns under the forward-moving car — the real-navigation look. Bearing
+    // comes from the live driver heading when available, otherwise points at
+    // the current target.
+    if (widget.navigationMode) {
+      final bearing = (widget.driverHeading != null && widget.driverHeading != 0)
+          ? widget.driverHeading!
+          : (tLat != null && tLng != null && tLat != 0 && tLng != 0)
+              ? _bearing(dLat, dLng, tLat, tLng)
+              : 0.0;
+      final cam = CameraPosition(
+        target: LatLng(dLat, dLng),
+        zoom: 17.0,
+        tilt: 55,
+        bearing: bearing,
+      );
+      // animateCamera throws "Map size can't be 0" if the surface isn't laid
+      // out yet (common right after the screen opens). Retry a few times so
+      // the tilted nav view reliably engages instead of staying top-down.
+      for (var attempt = 0; attempt < 4; attempt++) {
+        try {
+          await controller.animateCamera(CameraUpdate.newCameraPosition(cam));
+          return;
+        } catch (_) {
+          await Future.delayed(const Duration(milliseconds: 300));
+        }
+      }
+      return;
+    }
+
+    if (tLat != null && tLng != null && tLat != 0 && tLng != 0) {
       final bounds = LatLngBounds(
-        southwest: LatLng(dLat < pLat ? dLat : pLat, dLng < pLng ? dLng : pLng),
-        northeast: LatLng(dLat > pLat ? dLat : pLat, dLng > pLng ? dLng : pLng),
+        southwest: LatLng(dLat < tLat ? dLat : tLat, dLng < tLng ? dLng : tLng),
+        northeast: LatLng(dLat > tLat ? dLat : tLat, dLng > tLng ? dLng : tLng),
       );
       controller.animateCamera(CameraUpdate.newLatLngBounds(bounds, 90));
     } else {
@@ -260,6 +329,8 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     // (assigned driver + all nearby vehicles) are decoded and cached.
     final neededAssets = <String>{
       'assets/economy_car.png',
+      _pickupPinAsset,
+      _dropPinAsset,
       _assetForType(widget.driverVehicleType),
       if (widget.nearbyVehicles != null)
         for (final v in widget.nearbyVehicles!)
@@ -287,7 +358,9 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
       markers.add(Marker(
         markerId: const MarkerId('pickup'),
         position: LatLng(widget.pickupLat!, widget.pickupLng!),
-        icon: BitmapDescriptor.defaultMarkerWithHue(widget.pickupMarkerHue),
+        icon: _iconCache[_pickupPinAsset] ??
+            BitmapDescriptor.defaultMarkerWithHue(widget.pickupMarkerHue),
+        anchor: const Offset(0.5, 1.0),
         infoWindow: const InfoWindow(title: 'Pickup'),
       ));
     }
@@ -298,7 +371,9 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
       markers.add(Marker(
         markerId: const MarkerId('drop'),
         position: LatLng(widget.dropLat!, widget.dropLng!),
-        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+        icon: _iconCache[_dropPinAsset] ??
+            BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+        anchor: const Offset(0.5, 1.0),
         infoWindow: const InfoWindow(title: 'Drop'),
       ));
     }
@@ -307,14 +382,19 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     // marker until the cached bitmap is ready on first paint).
     if (widget.driverLat != null && widget.driverLng != null &&
         widget.driverLat != 0 && widget.driverLng != 0) {
+      final navMode = widget.navigationMode;
       markers.add(Marker(
         markerId: const MarkerId('driver'),
         position: LatLng(widget.driverLat!, widget.driverLng!),
         icon: _iconFor(widget.driverVehicleType) ??
             BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
-        // Upright billboard pinned at its base so the vehicle stands on the
-        // map instead of lying flat.
-        anchor: const Offset(0.5, 1.0),
+        // In navigation mode the vehicle lies flat on the road and rotates to
+        // the live heading so the customer sees it pointing the way it's
+        // actually moving (top-down nav look). Otherwise it stands upright,
+        // pinned at its base.
+        anchor: navMode ? const Offset(0.5, 0.5) : const Offset(0.5, 1.0),
+        rotation: navMode ? (widget.driverHeading ?? 0) : 0,
+        flat: navMode,
         infoWindow: const InfoWindow(title: 'Driver'),
       ));
     }
@@ -409,6 +489,16 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
             }
             widget.onMapCreated?.call(controller);
 
+            // Live tracking takes over the camera immediately so it engages the
+            // follow / nav view instead of briefly snapping to a pickup→drop box.
+            if (widget.followDriver &&
+                widget.driverLat != null && widget.driverLat != 0 &&
+                widget.driverLng != null && widget.driverLng != 0) {
+              await Future.delayed(const Duration(milliseconds: 200));
+              await _followDriver();
+              return;
+            }
+
             // Auto-fit bounds if both pickup and drop exist
             if (widget.pickupLat != null && widget.pickupLat != 0 &&
                 widget.dropLat != null && widget.dropLat != 0) {
@@ -475,6 +565,20 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
         child: Icon(icon, size: 20, color: Colors.black87),
       ),
     );
+  }
+
+  /// Initial bearing (degrees, 0–360) from one lat/lng to another, used to
+  /// orient the navigation camera so the driver's direction of travel points
+  /// "up" when no live heading is available.
+  double _bearing(double lat1, double lng1, double lat2, double lng2) {
+    final phi1 = lat1 * math.pi / 180;
+    final phi2 = lat2 * math.pi / 180;
+    final dLng = (lng2 - lng1) * math.pi / 180;
+    final y = math.sin(dLng) * math.cos(phi2);
+    final x = math.cos(phi1) * math.sin(phi2) -
+        math.sin(phi1) * math.cos(phi2) * math.cos(dLng);
+    final deg = math.atan2(y, x) * 180 / math.pi;
+    return (deg + 360) % 360;
   }
 
   double _min(double a, double b, double? c) {

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:get/get.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:hexcolor/hexcolor.dart';
@@ -88,15 +89,15 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
         if (!didPop) _handleBack();
       },
       child: Scaffold(
-      backgroundColor: Colors.white,
+      backgroundColor: HexColor('#FFD546'),
       body: Stack(
         children: [
-          // ── App bar ──
+          // ── Yellow app bar: back + "Book a cab" + notification bell ──
           bookARideAppBar(
-            height: 160,
+            height: 150,
             context: context,
-            child: Container(
-              padding: const EdgeInsets.only(top: 55, left: 15, right: 15),
+            child: Padding(
+              padding: const EdgeInsets.only(top: 50, left: 12, right: 16),
               child: Row(
                 children: [
                   InkWell(
@@ -105,80 +106,62 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
                       children: [
                         const Icon(Icons.arrow_back_ios,
                             size: 20, color: Colors.black),
-                        const SizedBox(width: 3),
+                        const SizedBox(width: 4),
                         Text("Book a cab",
                             style: GoogleFonts.poppins(
-                                fontSize: 16, fontWeight: FontWeight.w600)),
+                                fontSize: 18, fontWeight: FontWeight.w600)),
                       ],
                     ),
                   ),
                   const Spacer(),
-                  // OTP badge
-                  Obx(() {
-                    final otp = _bc.bookingOtp.value;
-                    if (otp.isEmpty) return const SizedBox.shrink();
-                    return Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(20),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.1),
-                            blurRadius: 4,
+                  // Notification bell (with unread dot) — matches Figma header.
+                  Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      const Icon(Icons.notifications_none_rounded,
+                          size: 28, color: Colors.black),
+                      Positioned(
+                        right: 3,
+                        top: 2,
+                        child: Container(
+                          width: 7,
+                          height: 7,
+                          decoration: const BoxDecoration(
+                            color: Color(0xFFD40000),
+                            shape: BoxShape.circle,
                           ),
-                        ],
+                        ),
                       ),
-                      child: Text('OTP-$otp',
-                          style: GoogleFonts.poppins(
-                              fontSize: 13, fontWeight: FontWeight.w700)),
-                    );
-                  }),
-                  const SizedBox(width: 8),
-                  // Cancel button
-                  Obx(() {
-                    final canCancel = [
-                      BookingState.searching,
-                      BookingState.driverAssigned,
-                      BookingState.driverArrived,
-                    ].contains(_bc.state.value);
-                    if (!canCancel) return const SizedBox.shrink();
-                    return InkWell(
-                      onTap: _cancelRide,
-                      child: Row(
-                        children: [
-                          Icon(Icons.close, color: Colors.red.shade600, size: 16),
-                          const SizedBox(width: 2),
-                          Text('Cancel Ride',
-                              style: GoogleFonts.poppins(
-                                  fontSize: 12,
-                                  color: Colors.red.shade600,
-                                  fontWeight: FontWeight.w500)),
-                        ],
-                      ),
-                    );
-                  }),
+                    ],
+                  ),
                 ],
               ),
             ),
           ),
 
-          // ── Map area ──
+          // ── Map area (rounded top corners) overlapping the app bar ──
           Container(
-            margin: const EdgeInsets.only(top: 120),
+            margin: const EdgeInsets.only(top: 110),
             child: ClipRRect(
               borderRadius: const BorderRadius.only(
                   topLeft: Radius.circular(32),
                   topRight: Radius.circular(32)),
               child: Stack(
                 children: [
-                  // Live Google Map — camera follows the driver in real time
-                  // as it approaches the pickup. Bottom padding keeps the
+                  // Live Google Map — Navigation-SDK-style camera follows the
+                  // driver in real time, with the vehicle marker rotating to the
+                  // live heading so the customer sees exactly where the driver
+                  // is and which way they're moving. Bottom padding keeps the
                   // vehicle framed above the info card.
                   Obx(() {
-                    final tracking = _bc.state.value == BookingState.driverAssigned ||
-                        _bc.state.value == BookingState.driverArrived;
+                    final st = _bc.state.value;
+                    final inProgress = st == BookingState.inProgress;
+                    // Keep the camera trailing the car for the whole live ride:
+                    // toward the pickup before boarding, then toward the drop
+                    // once the trip starts (Uber-style).
+                    final tracking = st == BookingState.driverAssigned ||
+                        st == BookingState.driverArrived ||
+                        inProgress;
                     return GoogleMapWidget(
                       pickupLat: _bc.pickupLat.value,
                       pickupLng: _bc.pickupLng.value,
@@ -188,11 +171,29 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
                       driverLng: _bc.driverLng.value,
                       driverHeading: _bc.driverHeading.value,
                       driverVehicleType: _bc.bookedVehicleType.value,
+                      // Live driver→destination road path drawn as the yellow
+                      // route line. The controller already swaps this between
+                      // driver→pickup and driver→drop as the ride progresses.
+                      routePolyline: _bc.routePolyline.value,
                       followDriver: tracking,
+                      // Turn-by-turn navigation camera while the driver is en
+                      // route (rotating marker + tilted follow view).
+                      navigationMode: tracking,
+                      // Once the ride is in progress, frame the car against the
+                      // drop so the camera tracks it all the way to the
+                      // destination.
+                      followTargetLat: inProgress ? _bc.dropLat.value : null,
+                      followTargetLng: inProgress ? _bc.dropLng.value : null,
                       padding: const EdgeInsets.only(bottom: 300),
                       interactive: true,
                     );
                   }),
+
+                  // ── Floating OTP pill (top-left over the map) ──
+                  Positioned(top: 16, left: 16, child: _otpPill()),
+
+                  // ── Floating Cancel Ride pill (top-right over the map) ──
+                  Positioned(top: 16, right: 16, child: _cancelPill()),
 
                   // ── Bottom card ──
                   Positioned(
@@ -209,6 +210,80 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
       ),
       ),
     );
+  }
+
+  /// White OTP pill shown over the top-left of the map (Figma "OTP-565").
+  Widget _otpPill() {
+    return Obx(() {
+      final otp = _bc.bookingOtp.value;
+      if (otp.isEmpty) return const SizedBox.shrink();
+      return Container(
+        height: 36,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(69),
+          border: Border.all(color: HexColor('#FFD546')),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.12),
+              blurRadius: 4,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Text('OTP-$otp',
+            style: GoogleFonts.poppins(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                color: HexColor('#2D3134'))),
+      );
+    });
+  }
+
+  /// White "Cancel Ride" pill (red text + close icon) over the top-right of the
+  /// map. Only shown while the ride can still be cancelled.
+  Widget _cancelPill() {
+    return Obx(() {
+      final canCancel = [
+        BookingState.searching,
+        BookingState.driverAssigned,
+        BookingState.driverArrived,
+      ].contains(_bc.state.value);
+      if (!canCancel) return const SizedBox.shrink();
+      return InkWell(
+        onTap: _cancelRide,
+        borderRadius: BorderRadius.circular(69),
+        child: Container(
+          height: 36,
+          padding: const EdgeInsets.only(left: 8, right: 16),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(69),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.12),
+                blurRadius: 4,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.close, color: HexColor('#D40000'), size: 20),
+              const SizedBox(width: 4),
+              Text('Cancel Ride',
+                  style: GoogleFonts.poppins(
+                      fontSize: 15,
+                      color: HexColor('#D40000'),
+                      fontWeight: FontWeight.w600)),
+            ],
+          ),
+        ),
+      );
+    });
   }
 
   Widget _buildBottomCard() {
@@ -269,26 +344,25 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // ── Floating ETA pill ──
+        // ── Green "Reaching in X mins" header bar (attached to the card) ──
         Obx(() {
           final arrived = _bc.state.value == BookingState.driverArrived;
           final statusText = arrived
               ? 'Driver has arrived'
               : 'Reaching in ${_bc.etaMinutes.value > 0 ? '${_bc.etaMinutes.value} min${_bc.etaMinutes.value == 1 ? '' : 's'}' : '...'}';
-          final bgColor =
-              arrived ? HexColor('#2196F3') : const Color(0xFF34C759);
+          final bgColor = arrived ? HexColor('#2196F3') : HexColor('#38B763');
           return Container(
-            width: MediaQuery.of(context).size.width - 48,
-            margin: const EdgeInsets.only(bottom: 14),
+            width: double.infinity,
             padding: const EdgeInsets.symmetric(vertical: 14),
             decoration: BoxDecoration(
               color: bgColor,
-              borderRadius: BorderRadius.circular(16),
+              borderRadius:
+                  const BorderRadius.vertical(top: Radius.circular(24)),
               boxShadow: [
                 BoxShadow(
-                  color: bgColor.withValues(alpha: 0.35),
-                  blurRadius: 14,
-                  offset: const Offset(0, 6),
+                  color: Colors.black.withValues(alpha: 0.10),
+                  blurRadius: 20,
+                  offset: const Offset(0, -2),
                 ),
               ],
             ),
@@ -299,7 +373,7 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
                 const SizedBox(width: 6),
                 Text(statusText,
                     style: GoogleFonts.poppins(
-                        fontSize: 14.5,
+                        fontSize: 15,
                         color: Colors.white,
                         fontWeight: FontWeight.w600)),
               ],
@@ -307,19 +381,11 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
           );
         }),
 
-        // ── Driver / fare info card ──
+        // ── Driver / fare info card (green bar above provides the rounded top) ──
         Container(
           width: double.infinity,
           decoration: BoxDecoration(
             color: HexColor('#FFD546'),
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(26)),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.08),
-                blurRadius: 16,
-                offset: const Offset(0, -4),
-              ),
-            ],
           ),
           padding: const EdgeInsets.fromLTRB(16, 18, 16, 0),
           child: SafeArea(
@@ -442,7 +508,7 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
                 // Action buttons
                 Row(
                   children: [
-                    _actionButton(Icons.call, 'Call', const Color(0xFF34C759),
+                    _actionButton(Icons.call, 'Call', HexColor('#38B562'),
                         onTap: () {
                       final phone =
                           _bc.driverInfo['mobileNumber']?.toString() ?? '';
@@ -454,13 +520,13 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
                     }),
                     const SizedBox(width: 10),
                     _actionButton(
-                        Icons.chat_bubble_outline, 'Chat', const Color(0xFF2F6BFF),
+                        Icons.chat_bubble_outline, 'Chat', HexColor('#015EA3'),
                         onTap: () {
                       Get.snackbar('Chat', 'Chat feature coming soon',
                           snackPosition: SnackPosition.BOTTOM);
                     }),
                     const SizedBox(width: 10),
-                    _actionButton(Icons.share, 'Share', Colors.black87,
+                    _actionButton(Icons.share, 'Share', HexColor('#212020'),
                         onTap: () async {
                       final pickup = _bc.pickupAddress.value;
                       final drop = _bc.dropAddress.value;
@@ -588,31 +654,90 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
     return '$count Rides';
   }
 
-  Widget _actionButton(IconData icon, String label, Color iconColor,
+  /// Figma action button: white fill, coloured outline + matching label/icon.
+  Widget _actionButton(IconData icon, String label, Color accent,
       {VoidCallback? onTap}) {
     return Expanded(
       child: GestureDetector(
         onTap: onTap,
         child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 12),
+          height: 41,
+          alignment: Alignment.center,
           decoration: BoxDecoration(
-            border: Border.all(color: Colors.black.withValues(alpha: 0.12)),
-            borderRadius: BorderRadius.circular(30),
+            border: Border.all(color: accent),
+            borderRadius: BorderRadius.circular(8),
             color: Colors.white,
           ),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(icon, size: 18, color: iconColor),
+              Icon(icon, size: 18, color: accent),
               const SizedBox(width: 6),
               Text(label,
                   style: GoogleFonts.poppins(
-                      fontSize: 13, fontWeight: FontWeight.w600)),
+                      fontSize: 14, fontWeight: FontWeight.w500, color: accent)),
             ],
           ),
         ),
       ),
     );
+  }
+
+  /// Live header for the in-progress ride: ETA (backend) + remaining distance
+  /// to the drop (derived from the live driver position) + destination label.
+  /// Mirrors the Figma "Start Trip" info bar and updates as the car moves.
+  Widget _destinationHeader() {
+    return Obx(() {
+      final eta = _bc.etaMinutes.value;
+      final etaText = eta > 0 ? '$eta min' : '-- min';
+
+      final remainingKm = _remainingKmToDrop();
+      final distText = remainingKm == null
+          ? ''
+          : remainingKm >= 1
+              ? '${remainingKm.toStringAsFixed(1)} km'
+              : '${(remainingKm * 1000).round()} m';
+
+      final dest = _bc.dropAddress.value.trim();
+      final destLabel = dest.isEmpty ? 'your destination' : dest.split(',').first;
+
+      return Row(
+        children: [
+          Icon(Icons.navigation_rounded, size: 18, color: HexColor('#0F6992')),
+          const SizedBox(width: 8),
+          Text(etaText,
+              style: GoogleFonts.poppins(
+                  fontSize: 18, fontWeight: FontWeight.w800)),
+          if (distText.isNotEmpty) ...[
+            const SizedBox(width: 10),
+            Container(width: 4, height: 4, decoration: BoxDecoration(
+                color: Colors.black26, borderRadius: BorderRadius.circular(2))),
+            const SizedBox(width: 10),
+            Text(distText,
+                style: GoogleFonts.poppins(
+                    fontSize: 18, fontWeight: FontWeight.w800)),
+          ],
+          const Spacer(),
+          Flexible(
+            child: Text('To $destLabel',
+                textAlign: TextAlign.right,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: GoogleFonts.poppins(
+                    fontSize: 12.5, color: Colors.grey.shade600)),
+          ),
+        ],
+      );
+    });
+  }
+
+  /// Straight-line distance (km) from the live driver position to the drop, or
+  /// null when either isn't known yet so the header simply omits distance.
+  double? _remainingKmToDrop() {
+    final dLat = _bc.driverLat.value, dLng = _bc.driverLng.value;
+    final dropLat = _bc.dropLat.value, dropLng = _bc.dropLng.value;
+    if (dLat == 0 || dLng == 0 || dropLat == 0 || dropLng == 0) return null;
+    return Geolocator.distanceBetween(dLat, dLng, dropLat, dropLng) / 1000.0;
   }
 
   // ── In progress ──
@@ -626,6 +751,10 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          // Live "heading to destination" header — ETA + remaining distance
+          // update in real time as the car moves toward the drop.
+          _destinationHeader(),
+          const SizedBox(height: 12),
           Container(
             width: double.infinity,
             padding: const EdgeInsets.symmetric(vertical: 12),

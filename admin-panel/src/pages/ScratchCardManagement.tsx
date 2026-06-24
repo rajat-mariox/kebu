@@ -12,8 +12,8 @@ type StatusFilter = "" | "UNSCRATCHED" | "SCRATCHED" | "EXPIRED";
 
 interface UserOption {
   _id: string;
-  name?: string;
-  phone?: string;
+  fullName?: string;
+  mobileNumber?: string;
   email?: string;
 }
 
@@ -230,7 +230,7 @@ export default function ScratchCardManagement() {
             >
               {users.map((u) => (
                 <option key={u._id} value={u._id}>
-                  {u.name || u.phone || u.email || u._id}
+                  {u.fullName || u.mobileNumber || u.email || u._id}
                 </option>
               ))}
             </select>

@@ -124,6 +124,54 @@ class OnboardingApiService {
     );
   }
 
+  /// Household partner onboarding — fetch the backend-driven "Address" form
+  /// schema (current + permanent address sections) plus any saved values.
+  static Future<ApiResponse> getHouseholdAddress() async {
+    return ApiClient.get('/driver/app/onboarding/household/address');
+  }
+
+  /// Household partner onboarding — save the "Address" step.
+  static Future<ApiResponse> saveHouseholdAddress({
+    required Map<String, dynamic> body,
+  }) async {
+    return ApiClient.post(
+      '/driver/app/onboarding/household/address',
+      body: body,
+    );
+  }
+
+  /// Household partner onboarding — fetch the backend-driven "Work Details" form
+  /// schema plus the live service category tree (for cascading dropdowns).
+  static Future<ApiResponse> getHouseholdWorkDetails() async {
+    return ApiClient.get('/driver/app/onboarding/household/work-details');
+  }
+
+  /// Household partner onboarding — save the "Work Details" step.
+  static Future<ApiResponse> saveHouseholdWorkDetails({
+    required Map<String, dynamic> body,
+  }) async {
+    return ApiClient.post(
+      '/driver/app/onboarding/household/work-details',
+      body: body,
+    );
+  }
+
+  /// Household partner onboarding — fetch the backend-driven "Bank Details" form
+  /// schema (final step) plus any saved values.
+  static Future<ApiResponse> getHouseholdBankDetails() async {
+    return ApiClient.get('/driver/app/onboarding/household/bank-details');
+  }
+
+  /// Household partner onboarding — save the "Bank Details" step (final step).
+  static Future<ApiResponse> saveHouseholdBankDetails({
+    required Map<String, dynamic> body,
+  }) async {
+    return ApiClient.post(
+      '/driver/app/onboarding/household/bank-details',
+      body: body,
+    );
+  }
+
   static Future<ApiResponse> saveOnboardingServiceCategories({
     required List<String> categoryIds,
   }) async {

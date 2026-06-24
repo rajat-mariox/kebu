@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_ringtone_player/flutter_ringtone_player.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 import 'package:hexcolor/hexcolor.dart';
+import 'package:kebu_driver/AppNavigation/app_navigation.dart';
 import 'package:kebu_driver/Screens/CleaningModule/TechnicianDashboard/Widgets/start_customer_direction.dart';
 import 'package:kebu_driver/Services/driver_api_service.dart';
 import 'package:kebu_driver/Services/socket_service.dart';
@@ -15,7 +16,7 @@ class IncomingServiceBottomSheet extends StatefulWidget {
   const IncomingServiceBottomSheet({
     super.key,
     required this.booking,
-    this.countdownSeconds = 30,
+    this.countdownSeconds = 180,
   });
 
   @override
@@ -95,24 +96,27 @@ class _IncomingServiceBottomSheetState extends State<IncomingServiceBottomSheet>
     if (res.success) {
       _stopRinging();
       Navigator.of(context).pop();
-      showModalBottomSheet(
-        context: context,
-        isScrollControlled: true,
-        backgroundColor: Colors.transparent,
-        shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
-        ),
-        builder: (_) => const StartCustomerDirection(),
-      );
+      // The accept response carries the booking + customer contact + booking
+      // number + category name; pass it straight to the direction screen.
+      final data = (res.data is Map)
+          ? Map<String, dynamic>.from(res.data as Map)
+          : <String, dynamic>{'booking': widget.booking};
+      pushTo(context, StartCustomerDirection(data: data));
     } else {
       Fluttertoast.showToast(msg: res.message.isNotEmpty ? res.message : "Could not accept");
     }
   }
 
+  num? get _amountValue {
+    final v = widget.booking['finalCost'] ??
+        widget.booking['estimatedCost'] ??
+        widget.booking['actualCost'];
+    return (v is num) ? v : null;
+  }
+
   String get _amount {
-    final v = widget.booking['estimatedCost'] ?? widget.booking['actualCost'] ?? widget.booking['finalCost'];
-    if (v == null) return "—";
-    return "₹ $v";
+    final v = _amountValue;
+    return v == null ? "—" : "₹ $v";
   }
 
   String get _paymentMethod {
@@ -120,7 +124,21 @@ class _IncomingServiceBottomSheetState extends State<IncomingServiceBottomSheet>
   }
 
   String get _serviceType {
-    return (widget.booking['serviceType'] ?? widget.booking['description'] ?? 'Household Service').toString();
+    return (widget.booking['serviceType'] ??
+            widget.booking['description'] ??
+            'Household Service')
+        .toString();
+  }
+
+  /// Category name when the booking payload includes a populated category,
+  /// otherwise falls back to the service type.
+  String get _category {
+    final cat = widget.booking['categoryId'] ?? widget.booking['category'];
+    if (cat is Map && (cat['name'] ?? '').toString().isNotEmpty) {
+      return cat['name'].toString();
+    }
+    final c = (widget.booking['categoryName'] ?? '').toString();
+    return c.isNotEmpty ? c : _serviceType;
   }
 
   String get _description {
@@ -145,6 +163,25 @@ class _IncomingServiceBottomSheetState extends State<IncomingServiceBottomSheet>
     return (a['fullAddress'] ?? a['address'] ?? '—').toString();
   }
 
+  String get _landmark {
+    final a = _address;
+    if (a == null) return '';
+    return (a['landmark'] ?? '').toString();
+  }
+
+  /// "X Km away" when the booking payload carries a distance, else empty.
+  String get _distanceText {
+    final d = widget.booking['distance'] ??
+        widget.booking['distanceKm'] ??
+        widget.booking['distanceInKm'];
+    if (d is num) {
+      final km = d % 1 == 0 ? d.toInt().toString() : d.toStringAsFixed(1);
+      return "$km Km away";
+    }
+    final t = (widget.booking['distanceText'] ?? '').toString();
+    return t;
+  }
+
   @override
   Widget build(BuildContext context) {
     final minutes = _durationMinutes;
@@ -167,28 +204,28 @@ class _IncomingServiceBottomSheetState extends State<IncomingServiceBottomSheet>
 
                   // Total amount section
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 17),
+                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
                     decoration: BoxDecoration(
                       color: Colors.white,
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.grey.withOpacity(0.5),
+                          color: Colors.grey.withOpacity(0.25),
                           blurRadius: 8,
-                          offset: const Offset(0, 2),
+                          offset: const Offset(0, 0),
                         ),
                       ],
-                      borderRadius: BorderRadius.circular(20),
+                      borderRadius: BorderRadius.circular(10),
                     ),
                     child: Column(
                       children: [
                         Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
-                            const SizedBox(width: 10),
                             const Text(
                               "Total Amount",
                               style: TextStyle(
                                 fontSize: 14,
-                                color: Colors.black87,
+                                color: Colors.black,
                                 fontWeight: FontWeight.w500,
                               ),
                             ),
@@ -196,87 +233,91 @@ class _IncomingServiceBottomSheetState extends State<IncomingServiceBottomSheet>
                             Text(
                               _amount,
                               style: const TextStyle(
-                                fontSize: 13,
+                                fontSize: 18,
                                 fontWeight: FontWeight.w600,
                                 color: Colors.black,
                               ),
                             ),
-                            const SizedBox(width: 10),
                           ],
                         ),
-                        const SizedBox(height: 4),
+                        const SizedBox(height: 8),
                         Row(
                           children: [
-                            const SizedBox(width: 10),
                             Text(
-                              "Payment Method : $_paymentMethod",
+                              "Payment method : $_paymentMethod",
                               style: const TextStyle(
-                                fontSize: 11,
-                                color: Colors.grey,
+                                fontSize: 12,
+                                color: Colors.black,
                               ),
                             ),
                             const Spacer(),
                             Text(
-                              minutes != null ? "Est Time : $minutes Mins" : "Est Time : —",
+                              minutes != null ? "Est time : $minutes Mins" : "Est time : 0 Mins",
                               style: const TextStyle(
-                                fontSize: 11,
-                                color: Color(0xFF2F5AE3),
-                                fontWeight: FontWeight.w500,
+                                fontSize: 12,
+                                color: Color(0xFF275FC8),
+                                fontWeight: FontWeight.w400,
                               ),
                             ),
-                            const SizedBox(width: 10),
                           ],
                         ),
                       ],
                     ),
                   ),
 
-                  const SizedBox(height: 10),
+                  const SizedBox(height: 12),
 
+                  // Service details
                   Container(
                     width: double.infinity,
-                    padding: const EdgeInsets.all(14),
+                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
                     decoration: BoxDecoration(
                       color: Colors.white,
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.grey.withOpacity(0.5),
+                          color: Colors.grey.withOpacity(0.25),
                           blurRadius: 8,
-                          offset: const Offset(0, 2),
+                          offset: const Offset(0, 0),
                         ),
                       ],
-                      borderRadius: BorderRadius.circular(20),
+                      borderRadius: BorderRadius.circular(10),
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          "Service: $_serviceType",
-                          style: const TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w500,
-                            color: Colors.black87,
+                        RichText(
+                          text: TextSpan(
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Colors.black,
+                              fontWeight: FontWeight.w400,
+                            ),
+                            children: [
+                              const TextSpan(text: "Service details - "),
+                              TextSpan(
+                                text: _category,
+                                style: const TextStyle(fontWeight: FontWeight.w500),
+                              ),
+                            ],
                           ),
                         ),
-                        if (_description.isNotEmpty) ...[
-                          const SizedBox(height: 4),
-                          Text(
-                            _description,
-                            style: const TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w400,
-                              color: Colors.black,
-                            ),
+                        const SizedBox(height: 8),
+                        Text(
+                          _description.isNotEmpty ? _description : _serviceType,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                            color: Colors.black,
                           ),
-                        ],
+                        ),
                       ],
                     ),
                   ),
 
                   const SizedBox(height: 20),
 
-                  // Address
-                  buildAddress(_fullAddress, '', true, context),
+                  // Address timeline (landmark → full address) with distance
+                  _buildAddressTimeline(),
 
                   const SizedBox(height: 20),
 
@@ -371,43 +412,106 @@ class _IncomingServiceBottomSheetState extends State<IncomingServiceBottomSheet>
     return "$m : $ss";
   }
 
-  Widget buildAddress(String address, String distance, bool selected, BuildContext context) {
-    return Row(
+  /// Two-stop address timeline matching the Figma: the landmark (with the
+  /// distance on the right) connected by a dotted line to the full address.
+  /// Falls back to a single stop when there's no landmark.
+  Widget _buildAddressTimeline() {
+    final landmark = _landmark;
+    final fullAddress = _fullAddress;
+    final hasTwo = landmark.isNotEmpty && landmark != fullAddress;
+
+    if (!hasTwo) {
+      return _addressRow(
+        dotFilled: true,
+        text: fullAddress,
+        distance: _distanceText,
+        showConnectorBelow: false,
+      );
+    }
+
+    return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Container(
-          height: 18,
-          width: 18,
-          margin: const EdgeInsets.only(top: 4),
-          decoration: BoxDecoration(
-            border: Border.all(color: HexColor("#275FC8"), width: 5),
-            borderRadius: BorderRadius.circular(100),
-          ),
+        _addressRow(
+          dotFilled: true,
+          text: landmark,
+          distance: _distanceText,
+          showConnectorBelow: true,
         ),
-        const SizedBox(width: 10),
-        SizedBox(
-          width: MediaQuery.of(context).size.width - 70,
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
+        _addressRow(
+          dotFilled: false,
+          text: fullAddress,
+          distance: '',
+          showConnectorBelow: false,
+        ),
+      ],
+    );
+  }
+
+  Widget _addressRow({
+    required bool dotFilled,
+    required String text,
+    required String distance,
+    required bool showConnectorBelow,
+  }) {
+    return IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Column(
             children: [
-              Expanded(
-                child: Text(
-                  address,
-                  style: const TextStyle(fontSize: 13, color: Colors.black87, fontWeight: FontWeight.w400),
+              Container(
+                height: 14,
+                width: 14,
+                margin: const EdgeInsets.only(top: 3),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: dotFilled ? HexColor("#275FC8") : Colors.white,
+                  border: Border.all(color: HexColor("#275FC8"), width: 3),
                 ),
               ),
-              if (distance.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: Text(
-                    distance,
-                    style: const TextStyle(fontSize: 12, color: Colors.black),
+              if (showConnectorBelow)
+                Expanded(
+                  child: Container(
+                    width: 1.5,
+                    margin: const EdgeInsets.symmetric(vertical: 4),
+                    color: HexColor("#275FC8").withOpacity(0.4),
                   ),
                 ),
             ],
           ),
-        ),
-      ],
+          const SizedBox(width: 12),
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(bottom: showConnectorBelow ? 16 : 0),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Text(
+                      text,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.black,
+                        height: 1.35,
+                        fontWeight: FontWeight.w300,
+                      ),
+                    ),
+                  ),
+                  if (distance.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 8, top: 1),
+                      child: Text(
+                        distance,
+                        style: const TextStyle(fontSize: 12, color: Colors.black),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

@@ -14,9 +14,19 @@ import VehicleType from "../models/vehicle-type.model";
 import VehicleCategory from "../models/vehicle-category.model";
 import DriverVehicle from "../models/driver-vehicle.model";
 import ServiceCategory from "../models/service-category.model";
+import ServiceBooking from "../models/service-booking.model";
 import HouseholdOnboardingConfig, {
   DEFAULT_HOUSEHOLD_PERSONAL_INFO_FIELDS,
 } from "../models/household-onboarding-config.model";
+import HouseholdAddressConfig, {
+  DEFAULT_HOUSEHOLD_ADDRESS_FIELDS,
+} from "../models/household-address-config.model";
+import HouseholdWorkDetailsConfig, {
+  DEFAULT_HOUSEHOLD_WORK_DETAILS_FIELDS,
+} from "../models/household-work-details-config.model";
+import HouseholdBankDetailsConfig, {
+  DEFAULT_HOUSEHOLD_BANK_DETAILS_FIELDS,
+} from "../models/household-bank-details-config.model";
 import * as CommissionService from "../services/commission.service";
 import * as MapsService from "../services/maps.service";
 import * as NotificationService from "../services/notification.service";
@@ -1452,6 +1462,694 @@ export const saveHouseholdPersonalInfo = async (
 };
 
 /**
+ * Household partner onboarding — "Address" step (second step of the flow).
+ *
+ * Returns the backend-driven field schema rendered under two sections — the
+ * current address and the permanent address — plus the 4-step indicator and any
+ * already-saved values to pre-fill. The field set lives in the
+ * HouseholdAddressConfig collection and is seeded with sensible defaults the
+ * first time it is requested while empty. Mirrors the Figma "Address" design.
+ */
+export const getHouseholdAddress = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  console.log("DriverController => getHouseholdAddress");
+
+  const driverId = (req as any).driverId;
+
+  // Seed defaults on first run so the form works without any admin setup.
+  const count = await HouseholdAddressConfig.countDocuments();
+  if (count === 0) {
+    await HouseholdAddressConfig.insertMany(DEFAULT_HOUSEHOLD_ADDRESS_FIELDS);
+  }
+
+  const configs = await HouseholdAddressConfig.find({ isActive: true })
+    .select("-__v -createdAt -updatedAt")
+    .sort({ displayOrder: 1 });
+
+  const fields = configs.map((c) => ({
+    key: c.key,
+    label: c.label,
+    type: c.type,
+    placeholder: c.placeholder,
+    keyboard: c.keyboard,
+    required: c.required,
+    readOnly: c.readOnly,
+    options: c.options,
+  }));
+
+  const driver = await DriverService.getDriverById(driverId);
+
+  const currentPrefill = {
+    address: driver?.address || "",
+    apartment: driver?.apartment || "",
+    state: driver?.state || "",
+    city: driver?.city || "",
+    country: driver?.country || "India",
+    zipCode: driver?.zipCode || "",
+  };
+
+  const permanentPrefill = {
+    address: driver?.permanentAddress || "",
+    apartment: driver?.permanentApartment || "",
+    state: driver?.permanentState || "",
+    city: driver?.permanentCity || "",
+    country: driver?.permanentCountry || "India",
+    zipCode: driver?.permanentZipCode || "",
+  };
+
+  req.rData = {
+    title: "Address",
+    steps: [
+      { key: "personal", label: "Personal Details" },
+      { key: "address", label: "Address" },
+      { key: "work", label: "Work Details" },
+      { key: "bank", label: "Bank Details" },
+    ],
+    currentStep: 1,
+    sections: [
+      { key: "current", title: "ADDRESS", supportsSameAsCurrent: false, fields },
+      {
+        key: "permanent",
+        title: "PERMANENT ADDRESS",
+        supportsSameAsCurrent: true,
+        fields,
+      },
+    ],
+    prefill: {
+      current: currentPrefill,
+      permanent: permanentPrefill,
+      sameAsCurrentAddress: driver?.sameAsCurrentAddress || false,
+    },
+  };
+  req.msg = "success";
+  next();
+};
+
+/**
+ * Household partner onboarding — save the "Address" step. Validates each
+ * section against the live field config (so required-ness stays in sync with
+ * what the app rendered) and persists both the current and permanent address
+ * onto the driver record. When "Same as Current Address" is selected the
+ * current address is copied into the permanent one.
+ */
+export const saveHouseholdAddress = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  console.log("DriverController => saveHouseholdAddress");
+
+  const driverId = (req as any).driverId;
+  const body = req.body || {};
+
+  const current = (body.current ?? {}) as Record<string, any>;
+  const sameAsCurrent = body.sameAsCurrentAddress === true;
+  // When "same as current" is chosen the permanent section is hidden in the app
+  // and mirrors the current address.
+  const permanent = sameAsCurrent
+    ? current
+    : ((body.permanent ?? {}) as Record<string, any>);
+
+  const configs = await HouseholdAddressConfig.find({ isActive: true }).sort({
+    displayOrder: 1,
+  });
+
+  const clean = (v: any) => (v ?? "").toString().trim();
+
+  const validateSection = (
+    values: Record<string, any>,
+    sectionLabel: string,
+  ): string | null => {
+    for (const cfg of configs) {
+      if (cfg.readOnly || !cfg.required) continue;
+      if (clean(values[cfg.key]) === "") {
+        return `${sectionLabel}: ${cfg.label} is required.`;
+      }
+    }
+    return null;
+  };
+
+  const currentErr = validateSection(current, "Current Address");
+  if (currentErr) {
+    return res.status(400).json({ code: 0, message: currentErr, data: {} });
+  }
+  if (!sameAsCurrent) {
+    const permanentErr = validateSection(permanent, "Permanent Address");
+    if (permanentErr) {
+      return res.status(400).json({ code: 0, message: permanentErr, data: {} });
+    }
+  }
+
+  const driver = await DriverService.getDriverById(driverId);
+
+  const updateData: Partial<IDriver> = {
+    address: clean(current.address),
+    apartment: clean(current.apartment),
+    state: clean(current.state),
+    city: clean(current.city),
+    country: clean(current.country) || "India",
+    zipCode: clean(current.zipCode),
+
+    permanentAddress: clean(permanent.address),
+    permanentApartment: clean(permanent.apartment),
+    permanentState: clean(permanent.state),
+    permanentCity: clean(permanent.city),
+    permanentCountry: clean(permanent.country) || "India",
+    permanentZipCode: clean(permanent.zipCode),
+    sameAsCurrentAddress: sameAsCurrent,
+
+    onboardingStep: Math.max(2, driver?.onboardingStep || 0),
+  };
+
+  await DriverService.updateDriver(driverId, updateData);
+
+  req.rData = { saved: true, onboardingStep: updateData.onboardingStep };
+  req.msg = "success";
+  next();
+};
+
+/**
+ * Build the parent → sub-categories tree from the live ServiceCategory
+ * collection, projected to the minimal {id, name} shape the partner app needs
+ * to populate the cascading category / sub-category dropdowns.
+ */
+const buildCategoryTreeForApp = async () => {
+  const categories = await ServiceCategory.find({ isActive: true })
+    .select("_id name parentId displayOrder")
+    .sort({ displayOrder: 1, name: 1 });
+
+  const parents = categories.filter((c) => !c.parentId);
+  return parents.map((parent) => ({
+    id: parent._id?.toString(),
+    name: parent.name,
+    subCategories: categories
+      .filter((c) => c.parentId?.toString() === parent._id?.toString())
+      .map((c) => ({ id: c._id?.toString(), name: c.name })),
+  }));
+};
+
+/**
+ * Household partner onboarding — "Work Details" step (third step of the flow).
+ *
+ * Returns the backend-driven field schema together with the live service
+ * category tree so the partner app can render the cascading "business category
+ * → sub-category" dropdowns without hardcoding any data. Mirrors the Figma
+ * "Work Details" design.
+ */
+export const getHouseholdWorkDetails = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  console.log("DriverController => getHouseholdWorkDetails");
+
+  const driverId = (req as any).driverId;
+
+  // Seed defaults on first run so the form works without any admin setup.
+  const count = await HouseholdWorkDetailsConfig.countDocuments();
+  if (count === 0) {
+    await HouseholdWorkDetailsConfig.insertMany(
+      DEFAULT_HOUSEHOLD_WORK_DETAILS_FIELDS,
+    );
+  }
+
+  const configs = await HouseholdWorkDetailsConfig.find({ isActive: true })
+    .select("-__v -createdAt -updatedAt")
+    .sort({ displayOrder: 1 });
+
+  const fields = configs.map((c) => ({
+    key: c.key,
+    label: c.label,
+    type: c.type,
+    placeholder: c.placeholder,
+    keyboard: c.keyboard,
+    required: c.required,
+    readOnly: c.readOnly,
+    optionsSource: c.optionsSource,
+    dependsOn: c.dependsOn,
+    options: c.options,
+  }));
+
+  const categoryTree = await buildCategoryTreeForApp();
+  const driver = await DriverService.getDriverById(driverId);
+
+  const prefill: Record<string, any> = {
+    primaryCategory: driver?.primaryCategory?.toString() || "",
+    primarySubCategory: driver?.primarySubCategory?.toString() || "",
+    secondaryCategory: driver?.secondaryCategory?.toString() || "",
+    secondarySubCategory: driver?.secondarySubCategory?.toString() || "",
+    serviceCity: driver?.serviceCity || "",
+    serviceArea: driver?.serviceArea || "",
+    businessType: driver?.businessType || "",
+  };
+
+  req.rData = {
+    title: "Work Details",
+    steps: [
+      { key: "personal", label: "Personal Details" },
+      { key: "address", label: "Address" },
+      { key: "work", label: "Work Details" },
+      { key: "bank", label: "Bank Details" },
+    ],
+    currentStep: 2,
+    fields,
+    categoryTree,
+    prefill,
+  };
+  req.msg = "success";
+  next();
+};
+
+/**
+ * Household partner onboarding — save the "Work Details" step. Validates each
+ * required field against the live config, resolves the chosen category ids
+ * against the ServiceCategory tree (rejecting stale/invalid selections) and
+ * persists onto the driver record. The selected categories are also mirrored
+ * into `householdCategories` so booking matching stays in sync.
+ */
+export const saveHouseholdWorkDetails = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  console.log("DriverController => saveHouseholdWorkDetails");
+
+  const driverId = (req as any).driverId;
+  const body = req.body || {};
+
+  const configs = await HouseholdWorkDetailsConfig.find({ isActive: true }).sort(
+    { displayOrder: 1 },
+  );
+
+  const clean = (v: any) => (v ?? "").toString().trim();
+
+  // Validate required-ness against the live config.
+  for (const cfg of configs) {
+    if (cfg.readOnly || !cfg.required) continue;
+    if (clean(body[cfg.key]) === "") {
+      return res
+        .status(400)
+        .json({ code: 0, message: `${cfg.label} is required.`, data: {} });
+    }
+  }
+
+  // Resolve & validate every category-typed field against the live tree.
+  const categoryKeys = configs
+    .filter((c) => c.optionsSource === "category" || c.optionsSource === "subcategory")
+    .map((c) => c.key);
+
+  const resolvedCategories: Record<string, Types.ObjectId | null> = {};
+  const idsToVerify: Types.ObjectId[] = [];
+  for (const key of categoryKeys) {
+    const idStr = clean(body[key]);
+    if (idStr === "") {
+      resolvedCategories[key] = null;
+      continue;
+    }
+    if (!Types.ObjectId.isValid(idStr)) {
+      return res.status(400).json({
+        code: 0,
+        message: "Invalid business category selected.",
+        data: {},
+      });
+    }
+    const oid = new Types.ObjectId(idStr);
+    resolvedCategories[key] = oid;
+    idsToVerify.push(oid);
+  }
+
+  if (idsToVerify.length > 0) {
+    const matched = await ServiceCategory.find({
+      _id: { $in: idsToVerify },
+      isActive: true,
+    }).select("_id");
+    const matchedSet = new Set(matched.map((m) => m._id?.toString()));
+    for (const oid of idsToVerify) {
+      if (!matchedSet.has(oid.toString())) {
+        return res.status(400).json({
+          code: 0,
+          message: "Selected business category is no longer available.",
+          data: {},
+        });
+      }
+    }
+  }
+
+  const driver = await DriverService.getDriverById(driverId);
+
+  // Mirror the selected categories into householdCategories (deduped) so the
+  // vendor is matched to bookings for these services.
+  const householdCategories = Array.from(
+    new Set(
+      Object.values(resolvedCategories)
+        .filter((v): v is Types.ObjectId => v !== null)
+        .map((v) => v.toString()),
+    ),
+  ).map((id) => new Types.ObjectId(id));
+
+  const updateData: Partial<IDriver> = {
+    primaryCategory: resolvedCategories["primaryCategory"] ?? undefined,
+    primarySubCategory: resolvedCategories["primarySubCategory"] ?? undefined,
+    secondaryCategory: resolvedCategories["secondaryCategory"] ?? undefined,
+    secondarySubCategory:
+      resolvedCategories["secondarySubCategory"] ?? undefined,
+    serviceCity: clean(body.serviceCity),
+    serviceArea: clean(body.serviceArea),
+    businessType: clean(body.businessType),
+    householdCategories: householdCategories as any,
+    serviceType: "cleaning",
+    onboardingStep: Math.max(3, driver?.onboardingStep || 0),
+  };
+
+  await DriverService.updateDriver(driverId, updateData);
+
+  req.rData = { saved: true, onboardingStep: updateData.onboardingStep };
+  req.msg = "success";
+  next();
+};
+
+/**
+ * Household partner onboarding — "Bank Details" step (final step of the flow).
+ *
+ * Returns the backend-driven field schema (bank dropdown + account number +
+ * IFSC) plus any already-saved values. Mirrors the Figma "Bank Details" design.
+ */
+export const getHouseholdBankDetails = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  console.log("DriverController => getHouseholdBankDetails");
+
+  const driverId = (req as any).driverId;
+
+  // Seed defaults on first run so the form works without any admin setup.
+  const count = await HouseholdBankDetailsConfig.countDocuments();
+  if (count === 0) {
+    await HouseholdBankDetailsConfig.insertMany(
+      DEFAULT_HOUSEHOLD_BANK_DETAILS_FIELDS,
+    );
+  }
+
+  const configs = await HouseholdBankDetailsConfig.find({ isActive: true })
+    .select("-__v -createdAt -updatedAt")
+    .sort({ displayOrder: 1 });
+
+  const fields = configs.map((c) => ({
+    key: c.key,
+    label: c.label,
+    type: c.type,
+    placeholder: c.placeholder,
+    keyboard: c.keyboard,
+    required: c.required,
+    readOnly: c.readOnly,
+    options: c.options,
+  }));
+
+  const driver = await DriverService.getDriverById(driverId);
+
+  const prefill: Record<string, any> = {
+    bankName: driver?.bankName || "",
+    accountNumber: driver?.accountNumber || "",
+    ifscCode: driver?.ifscCode || "",
+  };
+
+  req.rData = {
+    title: "Bank Details",
+    steps: [
+      { key: "personal", label: "Personal Details" },
+      { key: "address", label: "Address" },
+      { key: "work", label: "Work Details" },
+      { key: "bank", label: "Bank Details" },
+    ],
+    currentStep: 3,
+    isFinalStep: true,
+    fields,
+    prefill,
+  };
+  req.msg = "success";
+  next();
+};
+
+/**
+ * Household partner onboarding — save the "Bank Details" step. Validates against
+ * the live field config, persists the bank details and — as this is the final
+ * onboarding step — moves the partner to `under_verification` for admin review.
+ */
+export const saveHouseholdBankDetails = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  console.log("DriverController => saveHouseholdBankDetails");
+
+  const driverId = (req as any).driverId;
+  const body = req.body || {};
+
+  const configs = await HouseholdBankDetailsConfig.find({ isActive: true }).sort(
+    { displayOrder: 1 },
+  );
+
+  const clean = (v: any) => (v ?? "").toString().trim();
+
+  for (const cfg of configs) {
+    if (cfg.readOnly || !cfg.required) continue;
+    if (clean(body[cfg.key]) === "") {
+      return res
+        .status(400)
+        .json({ code: 0, message: `${cfg.label} is required.`, data: {} });
+    }
+  }
+
+  const driver = await DriverService.getDriverById(driverId);
+  if (!driver) {
+    req.rCode = 5;
+    req.msg = "driver_not_found";
+    return next();
+  }
+
+  const updateData: Partial<IDriver> = {
+    bankName: clean(body.bankName),
+    accountNumber: clean(body.accountNumber),
+    ifscCode: clean(body.ifscCode).toUpperCase(),
+    serviceType: "cleaning",
+    onboardingStep: Math.max(4, driver.onboardingStep || 0),
+    // Final step submitted → hand over to admin for verification.
+    status: "under_verification",
+  };
+
+  await DriverService.updateDriver(driverId, updateData);
+
+  req.rData = {
+    saved: true,
+    onboardingStep: updateData.onboardingStep,
+    status: updateData.status,
+  };
+  req.msg = "success";
+  next();
+};
+
+const MONTH_LABELS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+
+/** "28 Feb, 2022 at 8:30 AM"-style label for a booking card. */
+const formatBookingDate = (date?: Date, timeSlot?: string): string => {
+  if (!date) return timeSlot || "";
+  const d = new Date(date);
+  const day = d.getDate();
+  const month = MONTH_LABELS[d.getMonth()];
+  const year = d.getFullYear();
+  const base = `${day} ${month}, ${year}`;
+  return timeSlot ? `${base} at ${timeSlot}` : base;
+};
+
+/** "02 Dec"-style short label for a review row. */
+const formatShortDate = (date?: Date): string => {
+  if (!date) return "";
+  const d = new Date(date);
+  const day = d.getDate().toString().padStart(2, "0");
+  return `${day} ${MONTH_LABELS[d.getMonth()]}`;
+};
+
+/**
+ * Household partner home/dashboard — fully backend-driven.
+ *
+ * Aggregates the cleaning partner's real ServiceBooking data into the shape the
+ * technician dashboard renders: headline stat cards, the monthly revenue chart
+ * (last 8 months), the On Going / Pending / Completed booking tabs and the
+ * customer reviews. Mirrors the Figma "Cleaning" dashboard design. For
+ * household bookings the booking's `providerId` holds the Driver id (see
+ * HouseholdController.acceptServiceBooking), so we query against it directly.
+ */
+export const getHouseholdDashboard = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  console.log("DriverController => getHouseholdDashboard");
+
+  const driverId = (req as any).driverId;
+  const driver = await DriverService.getDriverById(driverId);
+  if (!driver) {
+    req.rCode = 5;
+    req.msg = "driver_not_found";
+    return next();
+  }
+
+  const providerObjId = new Types.ObjectId(String(driverId));
+
+  const bookings = await ServiceBooking.find({ providerId: providerObjId })
+    .populate("userId", "fullName profileImage")
+    .sort({ createdAt: -1 });
+
+  const fareOf = (b: any): number =>
+    b.finalCost ?? b.actualCost ?? b.estimatedCost ?? 0;
+
+  const ongoingStatuses = [
+    "ACCEPTED",
+    "PROVIDER_ASSIGNED",
+    "PROVIDER_EN_ROUTE",
+    "PROVIDER_ARRIVED",
+    "IN_PROGRESS",
+  ];
+
+  const completed = bookings.filter((b) => b.status === "COMPLETED");
+  const totalEarning = completed.reduce((sum, b) => sum + fareOf(b), 0);
+  const totalService = completed.length;
+
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const endOfToday = new Date();
+  endOfToday.setHours(23, 59, 59, 999);
+
+  const upcomingServices = bookings.filter(
+    (b) =>
+      ongoingStatuses.includes(b.status) &&
+      b.preferredDate &&
+      new Date(b.preferredDate) >= startOfToday,
+  ).length;
+
+  const todaysService = bookings.filter((b) => {
+    if (!b.preferredDate) return false;
+    const d = new Date(b.preferredDate);
+    return d >= startOfToday && d <= endOfToday;
+  }).length;
+
+  // Monthly revenue — last 8 months (oldest → newest), from completed bookings.
+  const nowDate = new Date();
+  const months = Array.from({ length: 8 }, (_, i) => {
+    const d = new Date(nowDate.getFullYear(), nowDate.getMonth() - (7 - i), 1);
+    return {
+      year: d.getFullYear(),
+      month: d.getMonth(),
+      label: MONTH_LABELS[d.getMonth()],
+      value: 0,
+    };
+  });
+  for (const b of completed) {
+    const d = new Date((b.completedAt ?? b.createdAt) as Date);
+    const bucket = months.find(
+      (m) => m.year === d.getFullYear() && m.month === d.getMonth(),
+    );
+    if (bucket) bucket.value += fareOf(b);
+  }
+
+  const projectBooking = (b: any) => {
+    const user = b.userId as any;
+    const price = fareOf(b);
+    let discountLabel = "";
+    if (b.discount && b.estimatedCost) {
+      const pct = Math.round((b.discount / b.estimatedCost) * 100);
+      if (pct > 0) discountLabel = `${pct}% Off`;
+    }
+    return {
+      id: b._id,
+      bookingNumber: `#${String(b._id).slice(-4)}`,
+      serviceType: b.serviceType || "",
+      price,
+      priceLabel: `₹${price}`,
+      discountLabel,
+      address: b.address?.fullAddress || "",
+      dateLabel: formatBookingDate(b.preferredDate, b.preferredTimeSlot),
+      customerName: user?.fullName || "",
+      status: b.status,
+    };
+  };
+
+  const ongoing = bookings
+    .filter((b) => ongoingStatuses.includes(b.status))
+    .map(projectBooking);
+  const pending = bookings
+    .filter((b) => b.status === "PENDING")
+    .map(projectBooking);
+  const completedList = completed.map(projectBooking);
+
+  const reviews = bookings
+    .filter((b) => typeof b.userRating === "number")
+    .slice(0, 10)
+    .map((b) => {
+      const user = b.userId as any;
+      return {
+        name: user?.fullName || "Customer",
+        image: user?.profileImage || "",
+        rating: b.userRating,
+        date: formatShortDate((b.completedAt ?? b.createdAt) as Date),
+        feedback: b.userFeedback || "",
+      };
+    });
+
+  req.rData = {
+    partner: {
+      name: driver.fullName,
+      profileImage: (driver as any).profileImage || "",
+      isOnline: driver.isOnline,
+      rating: driver.rating || 0,
+    },
+    stats: [
+      { key: "totalEarning", label: "Total Earning", value: `₹${totalEarning}` },
+      { key: "totalService", label: "Total Service", value: `${totalService}` },
+      {
+        key: "upcomingServices",
+        label: "Upcoming Services",
+        value: `${upcomingServices}`,
+      },
+      {
+        key: "todaysService",
+        label: "Today's Service",
+        value: `${todaysService}`,
+      },
+    ],
+    revenueChart: {
+      title: "Monthly Revenue Rupee",
+      points: months.map((m) => ({ label: m.label, value: m.value })),
+    },
+    bookingTabs: [
+      { key: "ongoing", label: "On Going", bookings: ongoing },
+      { key: "pending", label: "Pending", bookings: pending },
+      { key: "completed", label: "Completed", bookings: completedList },
+    ],
+    reviews: { title: "Reviews", items: reviews },
+  };
+  req.msg = "success";
+  next();
+};
+
+/**
  * Get household service category tree (parents + their sub-categories).
  * Used by the cleaning-vendor onboarding flow to let the partner pick the
  * services they want to receive bookings for.
@@ -1844,11 +2542,33 @@ export const getRoute = async (
 
   const km = directions.totalDistanceKm;
   const minutes = directions.totalDurationMin;
+
+  // Flatten all legs' steps into a turn-by-turn list for voice guidance.
+  // Strip Google's HTML instruction markup so it can be spoken by TTS.
+  const stripHtml = (s: string) =>
+    (s || "")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/&nbsp;/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const steps = (directions.legs || []).flatMap((leg: any) =>
+    (leg.steps || []).map((s: any) => ({
+      instruction: stripHtml(s.instruction),
+      maneuver: s.maneuver || "",
+      distanceMeters: Math.round((s.distanceKm || 0) * 1000),
+      lat: s.endLocation?.lat ?? 0,
+      lng: s.endLocation?.lng ?? 0,
+    })),
+  );
+
   req.rData = {
     polyline: directions.polyline,
     distanceKm: km,
     distanceMeters: Math.round(km * 1000),
     durationMin: minutes,
+    steps,
   };
   req.msg = "success";
   next();

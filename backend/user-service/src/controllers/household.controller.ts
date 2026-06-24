@@ -7,6 +7,8 @@ import * as AutomationRuleService from "../services/automation-rule.service";
 import * as SubscriptionBenefitsService from "../services/subscription-benefits.service";
 import Driver from "../models/driver.model";
 import ServiceBooking from "../models/service-booking.model";
+import ServiceCategory from "../models/service-category.model";
+import User from "../models/Users";
 import Offer from "../models/offer.model";
 
 /**
@@ -379,7 +381,27 @@ export const acceptServiceBooking = async (
     io.emit("service_booking_taken", { bookingId: String(booking._id) });
   }
 
-  req.rData = { booking };
+  // Enrich the response so the partner's "Start customer direction" screen can
+  // be fully data-driven — the customer's name/phone (for Call/Chat) and the
+  // booking's category name.
+  const customerUser = await User.findById(booking.userId).select(
+    "fullName mobileNumber countryCode profileImage",
+  );
+  const category = booking.categoryId
+    ? await ServiceCategory.findById(booking.categoryId).select("name")
+    : null;
+
+  req.rData = {
+    booking,
+    bookingNumber: `#${String(booking._id).slice(-4)}`,
+    categoryName: category?.name || "",
+    customer: {
+      name: customerUser?.fullName || "",
+      phone: customerUser?.mobileNumber || "",
+      countryCode: (customerUser as any)?.countryCode || "+91",
+      profileImage: customerUser?.profileImage || "",
+    },
+  };
   req.msg = "booking_accepted";
   next();
 };

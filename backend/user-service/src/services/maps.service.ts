@@ -179,6 +179,9 @@ export const getDirections = async (
           destination: `${destination.lat},${destination.lng}`,
           waypoints: waypointsParam,
           mode: "driving",
+          // Ask Google for multiple route options so we can pick the shortest
+          // by distance. (Ignored when waypoints are present.)
+          alternatives: waypointsParam ? undefined : true,
           key: apiKey,
         },
       },
@@ -188,7 +191,16 @@ export const getDirections = async (
       throw new Error("Unable to get directions");
     }
 
-    const route = response.data.routes[0];
+    // Pick the route with the shortest total driving distance, rather than
+    // Google's default "best" (fastest) route.
+    const routes = response.data.routes as any[];
+    const routeDistanceMeters = (r: any) =>
+      r.legs.reduce((sum: number, leg: any) => sum + leg.distance.value, 0);
+    const route = routes.reduce(
+      (shortest, r) =>
+        routeDistanceMeters(r) < routeDistanceMeters(shortest) ? r : shortest,
+      routes[0],
+    );
 
     return {
       polyline: route.overview_polyline.points,
@@ -199,6 +211,7 @@ export const getDirections = async (
         endAddress: leg.end_address,
         steps: leg.steps.map((step: any) => ({
           instruction: step.html_instructions,
+          maneuver: step.maneuver || "",
           distanceKm: step.distance.value / 1000,
           durationMin: Math.ceil(step.duration.value / 60),
           startLocation: step.start_location,
@@ -246,12 +259,19 @@ const getDirectionsOSRM = async (
         overview: "full",
         geometries: "polyline",
         steps: "true",
+        // Request alternates so we can choose the shortest-distance route.
+        alternatives: "true",
       },
     },
   );
 
-  const route = response.data?.routes?.[0];
-  if (!route) return null;
+  const routes = response.data?.routes as any[] | undefined;
+  if (!routes?.length) return null;
+  // Choose the shortest route by distance (OSRM's first route is fastest).
+  const route = routes.reduce(
+    (shortest, r) => (r.distance < shortest.distance ? r : shortest),
+    routes[0],
+  );
 
   return {
     polyline: route.geometry,
@@ -260,19 +280,28 @@ const getDirectionsOSRM = async (
       durationMin: Math.ceil(leg.duration / 60),
       startAddress: "",
       endAddress: "",
-      steps: (leg.steps || []).map((step: any) => ({
-        instruction: step.maneuver?.instruction || "",
-        distanceKm: step.distance / 1000,
-        durationMin: Math.ceil(step.duration / 60),
-        startLocation: {
-          lat: step.maneuver?.location?.[1] || 0,
-          lng: step.maneuver?.location?.[0] || 0,
-        },
-        endLocation: {
-          lat: step.maneuver?.location?.[1] || 0,
-          lng: step.maneuver?.location?.[0] || 0,
-        },
-      })),
+      steps: (leg.steps || []).map((step: any) => {
+        const modifier = step.maneuver?.modifier || "";
+        const type = step.maneuver?.type || "";
+        // OSRM has no human text; synthesise a basic one from type+modifier.
+        const synthesised = [type, modifier, step.name ? `onto ${step.name}` : ""]
+          .filter(Boolean)
+          .join(" ");
+        return {
+          instruction: step.maneuver?.instruction || synthesised,
+          maneuver: modifier || type,
+          distanceKm: step.distance / 1000,
+          durationMin: Math.ceil(step.duration / 60),
+          startLocation: {
+            lat: step.maneuver?.location?.[1] || 0,
+            lng: step.maneuver?.location?.[0] || 0,
+          },
+          endLocation: {
+            lat: step.maneuver?.location?.[1] || 0,
+            lng: step.maneuver?.location?.[0] || 0,
+          },
+        };
+      }),
     })),
     totalDistanceKm: route.distance / 1000,
     totalDurationMin: Math.ceil(route.duration / 60),

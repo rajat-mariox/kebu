@@ -29,6 +29,16 @@ export interface IDriver {
   // the ServiceCategory ids this vendor can service (plumbing, AC repair, deep cleaning, etc.)
   householdCategories?: Types.ObjectId[];
 
+  // Household partner "Work Details" onboarding step. Primary/secondary
+  // business category + sub-category reference the ServiceCategory tree.
+  primaryCategory?: Types.ObjectId;
+  primarySubCategory?: Types.ObjectId;
+  secondaryCategory?: Types.ObjectId;
+  secondarySubCategory?: Types.ObjectId;
+  serviceCity?: string;
+  serviceArea?: string;
+  businessType?: string;
+
   // Household partner "Personal Details" onboarding (backend-driven form).
   totalExperience?: string;
   pastWorkExperience?: string;
@@ -43,6 +53,18 @@ export interface IDriver {
   country?: string;
   zipCode?: string;
   emergencyContact?: string;
+
+  // Permanent address (household partner onboarding "Address" step). The
+  // current address reuses the flat fields above; these mirror them for the
+  // partner's permanent address. `sameAsCurrentAddress` records whether the
+  // partner chose to copy the current address into the permanent one.
+  permanentAddress?: string;
+  permanentApartment?: string;
+  permanentState?: string;
+  permanentCity?: string;
+  permanentCountry?: string;
+  permanentZipCode?: string;
+  sameAsCurrentAddress?: boolean;
 
   // Bank Details
   bankName?: string;
