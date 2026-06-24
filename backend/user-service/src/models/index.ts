@@ -17,6 +17,9 @@ import WalletTransaction from "./wallet-transaction.model";
 import RewardTransaction from "./reward-transaction.model";
 import UserGST from "./user-gst.model";
 import HouseholdOnboardingConfig from "./household-onboarding-config.model";
+import HouseholdAddressConfig from "./household-address-config.model";
+import HouseholdWorkDetailsConfig from "./household-work-details-config.model";
+import HouseholdBankDetailsConfig from "./household-bank-details-config.model";
 
 mongoose.set("strictQuery", true);
 
@@ -73,6 +76,9 @@ export const models = {
   RewardTransaction,
   UserGST,
   HouseholdOnboardingConfig,
+  HouseholdAddressConfig,
+  HouseholdWorkDetailsConfig,
+  HouseholdBankDetailsConfig,
 } as const;
 
 export default connectDB;

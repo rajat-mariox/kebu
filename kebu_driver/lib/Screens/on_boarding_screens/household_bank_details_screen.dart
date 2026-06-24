@@ -1,31 +1,28 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:get/get.dart';
 import 'package:hexcolor/hexcolor.dart';
 import 'package:kebu_driver/AppNavigation/app_navigation.dart';
-import 'package:kebu_driver/Screens/on_boarding_screens/household_address_screen.dart';
+import 'package:kebu_driver/Screens/DriverModule/VerificationScreen/verification_screen.dart';
 import 'package:kebu_driver/Screens/on_boarding_screens/onboarding_api_service.dart';
-import 'package:kebu_driver/Screens/on_boarding_screens/onboarding_controller.dart';
 import 'package:kebu_driver/Utils/CustomToast/custome_toast.dart';
 
-/// Household partner onboarding — first screen ("Personal Details").
+/// Household partner onboarding — final screen ("Bank Details").
 ///
-/// Fully backend-driven: the field list, labels, validation and dropdown
-/// options are fetched from `/onboarding/household/personal-info` and rendered
-/// dynamically, so the form can change without an app release. Matches the
-/// Figma "Personal Info" design (blue header + 4-step indicator).
-class HouseholdPersonalInfoScreen extends StatefulWidget {
-  const HouseholdPersonalInfoScreen({super.key});
+/// Fully backend-driven: the field list, labels, validation and the bank
+/// dropdown options are fetched from `/onboarding/household/bank-details` and
+/// rendered dynamically. Saving submits the whole application for admin review
+/// (the driver moves to `under_verification`). Matches the Figma "Bank Details"
+/// design (blue header + 4-step indicator, ACCOUNT DETAILS section).
+class HouseholdBankDetailsScreen extends StatefulWidget {
+  const HouseholdBankDetailsScreen({super.key});
 
   @override
-  State<HouseholdPersonalInfoScreen> createState() =>
-      _HouseholdPersonalInfoScreenState();
+  State<HouseholdBankDetailsScreen> createState() =>
+      _HouseholdBankDetailsScreenState();
 }
 
-class _HouseholdPersonalInfoScreenState
-    extends State<HouseholdPersonalInfoScreen> {
-  final OnboardingController _controller = Get.find<OnboardingController>();
-
+class _HouseholdBankDetailsScreenState
+    extends State<HouseholdBankDetailsScreen> {
   // Theme tokens lifted straight from the Figma design.
   static final Color _primary = HexColor("#2C54C1");
   static final Color _bg = HexColor("#F8FAFC");
@@ -36,15 +33,13 @@ class _HouseholdPersonalInfoScreenState
   bool _loading = true;
   bool _saving = false;
 
-  String _title = "Personal Details";
+  String _title = "Bank Details";
   List<Map<String, dynamic>> _fields = [];
   List<Map<String, dynamic>> _steps = [];
-  int _currentStep = 0;
+  int _currentStep = 3;
 
-  // Per-field state, keyed by field `key`.
   final Map<String, TextEditingController> _textControllers = {};
   final Map<String, String?> _dropdownValues = {};
-  final Map<String, List<String>> _multiValues = {};
 
   @override
   void initState() {
@@ -62,7 +57,7 @@ class _HouseholdPersonalInfoScreenState
 
   Future<void> _loadConfig() async {
     setState(() => _loading = true);
-    final res = await OnboardingApiService.getHouseholdPersonalInfo();
+    final res = await OnboardingApiService.getHouseholdBankDetails();
     if (!mounted) return;
 
     if (!res.success || res.data == null) {
@@ -90,34 +85,21 @@ class _HouseholdPersonalInfoScreenState
       final type = (f['type'] ?? 'text').toString();
       final pre = prefill[key];
 
-      switch (type) {
-        case 'multiselect':
-          _multiValues[key] = (pre is List)
-              ? pre.map((e) => e.toString()).toList()
-              : <String>[];
-          break;
-        case 'dropdown':
-          _dropdownValues[key] =
-              (pre != null && pre.toString().isNotEmpty) ? pre.toString() : null;
-          break;
-        default: // text / phone
-          final ctrl = TextEditingController();
-          if (key == 'mobileNumber') {
-            final code = (prefill['countryCode'] ?? '+91').toString();
-            final mobile = (pre ?? '').toString();
-            ctrl.text = mobile.isEmpty ? code : '$code $mobile';
-          } else if (pre != null) {
-            ctrl.text = pre.toString();
-          }
-          _textControllers[key] = ctrl;
+      if (type == 'dropdown') {
+        _dropdownValues[key] =
+            (pre != null && pre.toString().isNotEmpty) ? pre.toString() : null;
+      } else {
+        final ctrl = TextEditingController();
+        if (pre != null) ctrl.text = pre.toString();
+        _textControllers[key] = ctrl;
       }
     }
 
     setState(() {
-      _title = (data['title'] ?? 'Personal Details').toString();
+      _title = (data['title'] ?? 'Bank Details').toString();
       _fields = fields;
       _steps = steps;
-      _currentStep = (data['currentStep'] is int) ? data['currentStep'] : 0;
+      _currentStep = (data['currentStep'] is int) ? data['currentStep'] : 3;
       _loading = false;
     });
   }
@@ -127,12 +109,8 @@ class _HouseholdPersonalInfoScreenState
     for (final f in _fields) {
       final key = (f['key'] ?? '').toString();
       final type = (f['type'] ?? 'text').toString();
-      final readOnly = f['readOnly'] == true;
-      if (key.isEmpty || readOnly) continue;
-
-      if (type == 'multiselect') {
-        body[key] = _multiValues[key] ?? <String>[];
-      } else if (type == 'dropdown') {
+      if (key.isEmpty || f['readOnly'] == true) continue;
+      if (type == 'dropdown') {
         body[key] = _dropdownValues[key] ?? '';
       } else {
         body[key] = _textControllers[key]?.text.trim() ?? '';
@@ -147,15 +125,14 @@ class _HouseholdPersonalInfoScreenState
       final key = (f['key'] ?? '').toString();
       final label = (f['label'] ?? 'This field').toString();
       final val = body[key];
-      final empty = val == null ||
-          (val is String && val.trim().isEmpty) ||
-          (val is List && val.isEmpty);
-      if (empty) return '$label is required.';
+      if (val == null || val.toString().trim().isEmpty) {
+        return '$label is required.';
+      }
     }
     return null;
   }
 
-  Future<void> _save({required bool advance}) async {
+  Future<void> _save() async {
     final body = _collectBody();
     final err = _validate(body);
     if (err != null) {
@@ -164,26 +141,22 @@ class _HouseholdPersonalInfoScreenState
     }
 
     setState(() => _saving = true);
-    final res = await OnboardingApiService.saveHouseholdPersonalInfo(body: body);
+    final res = await OnboardingApiService.saveHouseholdBankDetails(body: body);
     if (!mounted) return;
     setState(() => _saving = false);
 
     if (!res.success) {
-      showCustomToast(context, res.message ?? 'Failed to save details.');
+      showCustomToast(context, res.message ?? 'Failed to save bank details.');
       return;
     }
 
-    // Keep the shared onboarding controller in sync for downstream steps.
-    _controller.serviceType.value = 'cleaning';
-    _controller.nameController.text = (body['fullName'] ?? '').toString();
-    _controller.emailController.text = (body['email'] ?? '').toString();
-
-    if (advance) {
-      // Household onboarding flow: Personal Details → Address → Work → Bank.
-      pushTo(context, const HouseholdAddressScreen());
-    } else {
-      showCustomToast(context, 'Details saved.');
-    }
+    // Final step submitted — onboarding complete. Send the partner to the
+    // verification screen, which waits for admin approval (polls status on
+    // entry / app-resume and moves them to the dashboard once approved). The
+    // whole onboarding stack is cleared so they can't navigate back into it.
+    showCustomToast(
+        context, 'Application submitted! Your details are under review.');
+    replaceRoute(context, const VerificationScreen());
   }
 
   @override
@@ -235,7 +208,7 @@ class _HouseholdPersonalInfoScreenState
               ),
             ),
             InkWell(
-              onTap: _saving ? null : () => _save(advance: false),
+              onTap: _saving ? null : _save,
               child: const Text(
                 "Save",
                 style: TextStyle(
@@ -291,21 +264,22 @@ class _HouseholdPersonalInfoScreenState
   }
 
   Widget _stepNode(int index) {
+    // Completed steps (before the current one) show a blue check; the current
+    // step (Bank Details) shows an empty circle — matches the Figma design
+    // (Personal Details + Address + Work Details all checked).
     final done = index < _currentStep;
-    final current = index == _currentStep;
-    final filled = done || current;
     return Container(
       width: 24,
       height: 24,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: filled ? _primary : Colors.white,
+        color: done ? _primary : Colors.white,
         border: Border.all(
-          color: filled ? _primary : HexColor("#848484"),
+          color: done ? _primary : HexColor("#848484"),
           width: 1.5,
         ),
       ),
-      child: (done || current)
+      child: done
           ? const Icon(Icons.check, color: Colors.white, size: 14)
           : Center(
               child: Container(
@@ -330,7 +304,7 @@ class _HouseholdPersonalInfoScreenState
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _sectionHeader("PERSONAL DETAILS"),
+            _sectionHeader("ACCOUNT DETAILS"),
             const SizedBox(height: 20),
             ..._fields.map(_buildField),
             const SizedBox(height: 8),
@@ -362,17 +336,7 @@ class _HouseholdPersonalInfoScreenState
 
   Widget _buildField(Map<String, dynamic> f) {
     final type = (f['type'] ?? 'text').toString();
-    Widget input;
-    switch (type) {
-      case 'dropdown':
-        input = _dropdownInput(f);
-        break;
-      case 'multiselect':
-        input = _multiSelectInput(f);
-        break;
-      default:
-        input = _textInput(f);
-    }
+    final input = type == 'dropdown' ? _dropdownInput(f) : _textInput(f);
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 20),
@@ -474,6 +438,8 @@ class _HouseholdPersonalInfoScreenState
             Expanded(
               child: Text(
                 selected ?? placeholder,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   color: selected == null ? _hintColor : _labelColor,
                   fontSize: 15,
@@ -487,93 +453,23 @@ class _HouseholdPersonalInfoScreenState
     );
   }
 
-  Widget _multiSelectInput(Map<String, dynamic> f) {
-    final key = (f['key'] ?? '').toString();
-    final placeholder = (f['placeholder'] ?? 'Select').toString();
-    final options =
-        (f['options'] as List? ?? const []).map((e) => e.toString()).toList();
-    final selected = _multiValues[key] ?? <String>[];
-
-    return InkWell(
-      onTap: () =>
-          _openMultiSelectSheet(key, f['label']?.toString() ?? '', options),
-      child: Container(
-        decoration: _boxDecoration,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                selected.isEmpty ? placeholder : selected.join(', '),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: selected.isEmpty ? _hintColor : _labelColor,
-                  fontSize: 15,
-                ),
-              ),
-            ),
-            Icon(Icons.keyboard_arrow_down_rounded, color: _labelColor, size: 22),
-          ],
-        ),
-      ),
-    );
-  }
-
   void _openDropdownSheet(String key, String title, List<String> options) {
+    if (options.isEmpty) {
+      showCustomToast(context, 'No options available.');
+      return;
+    }
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.white,
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 12),
-            Text(title,
-                style: TextStyle(
-                    color: _labelColor,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-            Flexible(
-              child: ListView(
-                shrinkWrap: true,
-                children: options.map((opt) {
-                  final isSel = _dropdownValues[key] == opt;
-                  return ListTile(
-                    title: Text(opt,
-                        style: TextStyle(color: _labelColor, fontSize: 15)),
-                    trailing: isSel
-                        ? Icon(Icons.check, color: _primary)
-                        : null,
-                    onTap: () {
-                      setState(() => _dropdownValues[key] = opt);
-                      Navigator.pop(ctx);
-                    },
-                  );
-                }).toList(),
-              ),
-            ),
-            const SizedBox(height: 8),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _openMultiSelectSheet(String key, String title, List<String> options) {
-    final current = List<String>.from(_multiValues[key] ?? <String>[]);
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheet) => SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(ctx).size.height * 0.6,
+          ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -588,49 +484,21 @@ class _HouseholdPersonalInfoScreenState
                 child: ListView(
                   shrinkWrap: true,
                   children: options.map((opt) {
-                    final isSel = current.contains(opt);
-                    return CheckboxListTile(
-                      value: isSel,
-                      activeColor: _primary,
-                      controlAffinity: ListTileControlAffinity.leading,
+                    final isSel = _dropdownValues[key] == opt;
+                    return ListTile(
                       title: Text(opt,
                           style: TextStyle(color: _labelColor, fontSize: 15)),
-                      onChanged: (v) {
-                        setSheet(() {
-                          if (v == true) {
-                            current.add(opt);
-                          } else {
-                            current.remove(opt);
-                          }
-                        });
+                      trailing:
+                          isSel ? Icon(Icons.check, color: _primary) : null,
+                      onTap: () {
+                        setState(() => _dropdownValues[key] = opt);
+                        Navigator.pop(ctx);
                       },
                     );
                   }).toList(),
                 ),
               ),
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _primary,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8)),
-                    ),
-                    onPressed: () {
-                      setState(() => _multiValues[key] = current);
-                      Navigator.pop(ctx);
-                    },
-                    child: const Text("Done",
-                        style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold)),
-                  ),
-                ),
-              ),
+              const SizedBox(height: 8),
             ],
           ),
         ),
@@ -663,7 +531,7 @@ class _HouseholdPersonalInfoScreenState
         const SizedBox(width: 12),
         Expanded(
           child: InkWell(
-            onTap: _saving ? null : () => _save(advance: true),
+            onTap: _saving ? null : _save,
             child: Container(
               height: 52,
               alignment: Alignment.center,
@@ -671,7 +539,7 @@ class _HouseholdPersonalInfoScreenState
                 color: _primary,
                 borderRadius: BorderRadius.circular(5),
               ),
-              child: Text(_saving ? "Saving..." : "Next",
+              child: Text(_saving ? "Saving..." : "Save",
                   style: const TextStyle(
                       color: Colors.white,
                       fontSize: 17,

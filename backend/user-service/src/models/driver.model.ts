@@ -61,6 +61,40 @@ const DriverSchema = new Schema<IDriver>(
       index: true,
     },
 
+    // ── Household partner "Work Details" onboarding step ──
+    primaryCategory: {
+      type: Schema.Types.ObjectId,
+      ref: "ServiceCategory",
+      default: null,
+    },
+    primarySubCategory: {
+      type: Schema.Types.ObjectId,
+      ref: "ServiceCategory",
+      default: null,
+    },
+    secondaryCategory: {
+      type: Schema.Types.ObjectId,
+      ref: "ServiceCategory",
+      default: null,
+    },
+    secondarySubCategory: {
+      type: Schema.Types.ObjectId,
+      ref: "ServiceCategory",
+      default: null,
+    },
+    serviceCity: {
+      type: String,
+      default: "",
+    },
+    serviceArea: {
+      type: String,
+      default: "",
+    },
+    businessType: {
+      type: String,
+      default: "",
+    },
+
     // ── Household partner "Personal Details" onboarding (backend-driven) ──
     totalExperience: {
       type: String,
@@ -116,6 +150,36 @@ const DriverSchema = new Schema<IDriver>(
     emergencyContact: {
       type: String,
       default: "",
+    },
+
+    // ── Permanent address (household partner "Address" onboarding step) ──
+    permanentAddress: {
+      type: String,
+      default: "",
+    },
+    permanentApartment: {
+      type: String,
+      default: "",
+    },
+    permanentState: {
+      type: String,
+      default: "",
+    },
+    permanentCity: {
+      type: String,
+      default: "",
+    },
+    permanentCountry: {
+      type: String,
+      default: "India",
+    },
+    permanentZipCode: {
+      type: String,
+      default: "",
+    },
+    sameAsCurrentAddress: {
+      type: Boolean,
+      default: false,
     },
 
     // Bank Details

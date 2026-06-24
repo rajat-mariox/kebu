@@ -1,8 +1,8 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:hexcolor/hexcolor.dart';
 import 'package:kebu_driver/Utils/polyline_decoder.dart';
 
 /// A reusable Google Maps widget with the same interface as OsmMapWidget.
@@ -42,6 +42,13 @@ class GoogleMapWidget extends StatefulWidget {
   final double? focusLat;
   final double? focusLng;
 
+  /// Turn-by-turn navigation camera: instead of framing driver+destination in
+  /// a flat top-down box, keep a close, tilted (3D) view centred on the driver
+  /// and rotated so "up" points toward the destination — the real-navigation
+  /// look. Requires [followDriver]. Falls back to the bounds framing when the
+  /// driver/destination coords aren't available yet.
+  final bool navigationMode;
+
   const GoogleMapWidget({
     super.key,
     this.centerLat,
@@ -61,6 +68,7 @@ class GoogleMapWidget extends StatefulWidget {
     this.followDriver = false,
     this.focusLat,
     this.focusLng,
+    this.navigationMode = false,
   });
 
   @override
@@ -70,10 +78,16 @@ class GoogleMapWidget extends StatefulWidget {
 class _GoogleMapWidgetState extends State<GoogleMapWidget> {
   final Completer<GoogleMapController> _controller = Completer();
 
-  // Exact Figma map-pin icons (pickup + destination). Null until loaded;
-  // markers fall back to default coloured pins meanwhile.
+  // Exact Figma map-pin icons. Null until loaded; markers fall back to default
+  // coloured pins meanwhile.
+  //   • _pickupIcon  — customer pickup: red pin with a person avatar
+  //   • _driverIcon  — the driver's own location: blue concentric target pin
+  //   • _dropIcon    — destination: red location pin
+  //   • _navArrowIcon — turn-by-turn heading arrow (used in navigationMode)
   static BitmapDescriptor? _pickupIcon;
   static BitmapDescriptor? _dropIcon;
+  static BitmapDescriptor? _driverIcon;
+  static BitmapDescriptor? _navArrowIcon;
 
   @override
   void initState() {
@@ -82,12 +96,21 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
   }
 
   Future<void> _loadMarkerIcons() async {
-    if (_pickupIcon != null && _dropIcon != null) return;
+    if (_pickupIcon != null &&
+        _dropIcon != null &&
+        _driverIcon != null &&
+        _navArrowIcon != null) {
+      return;
+    }
     try {
-      _pickupIcon =
-          await _bitmapFromPng('assets/booking_buzzer/pickup_pin.png', 38);
+      _pickupIcon = await _bitmapFromPng(
+          'assets/booking_buzzer/pickup_person_marker.png', 40);
       _dropIcon =
           await _bitmapFromPng('assets/booking_buzzer/destination_pin.png', 38);
+      _driverIcon = await _bitmapFromPng(
+          'assets/booking_buzzer/driver_location_marker.png', 40);
+      _navArrowIcon =
+          await _bitmapFromPng('assets/booking_buzzer/nav_arrow.png', 44);
       if (mounted) setState(() {});
     } catch (_) {
       // Leave defaults on failure.
@@ -152,36 +175,36 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
   bool _isValid(double? lat, double? lng) =>
       lat != null && lng != null && lat != 0 && lng != 0;
 
-  /// Live tracking: keep the driver and their current destination in view,
-  /// tightening as the driver approaches. Falls back to centring on the
-  /// driver at street zoom when the destination isn't known yet.
+  /// Live tracking: keep the camera centred on the driver so they always see
+  /// the road ahead and upcoming turns. In navigation mode it's a close,
+  /// tilted, heading-aligned turn-by-turn view; otherwise (e.g. en route to
+  /// pickup) a flat, north-up, street-level follow.
   Future<void> _followDriver() async {
     if (!_controller.isCompleted) return;
     if (!_isValid(widget.driverLat, widget.driverLng)) return;
     final controller = await _controller.future;
     final dLat = widget.driverLat!;
     final dLng = widget.driverLng!;
+    final hasFocus = _isValid(widget.focusLat, widget.focusLng);
 
-    if (_isValid(widget.focusLat, widget.focusLng)) {
-      final fLat = widget.focusLat!;
-      final fLng = widget.focusLng!;
-      final bounds = LatLngBounds(
-        southwest: LatLng(dLat < fLat ? dLat : fLat, dLng < fLng ? dLng : fLng),
-        northeast: LatLng(dLat > fLat ? dLat : fLat, dLng > fLng ? dLng : fLng),
-      );
-      for (var attempt = 0; attempt < 3; attempt++) {
-        try {
-          await controller
-              .animateCamera(CameraUpdate.newLatLngBounds(bounds, 70));
-          return;
-        } catch (_) {
-          await Future.delayed(const Duration(milliseconds: 300));
-        }
+    final cam = CameraPosition(
+      target: LatLng(dLat, dLng),
+      zoom: widget.navigationMode ? 17.5 : 16.5,
+      tilt: widget.navigationMode ? 60 : 0,
+      bearing: (widget.navigationMode && hasFocus)
+          ? _bearing(dLat, dLng, widget.focusLat!, widget.focusLng!)
+          : 0,
+    );
+    // animateCamera throws "Map size can't be 0" if the surface isn't laid out
+    // yet (common right after the screen opens). Retry a few times so the
+    // follow reliably engages instead of leaving the camera where it started.
+    for (var attempt = 0; attempt < 4; attempt++) {
+      try {
+        await controller.animateCamera(CameraUpdate.newCameraPosition(cam));
+        return;
+      } catch (_) {
+        await Future.delayed(const Duration(milliseconds: 300));
       }
-    } else {
-      controller.animateCamera(CameraUpdate.newCameraPosition(
-        CameraPosition(target: LatLng(dLat, dLng), zoom: 16),
-      ));
     }
   }
 
@@ -238,15 +261,15 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     final markers = <Marker>{};
     final polylines = <Polyline>{};
 
-    // Driving-route polyline (yellow, matches Figma "Start Trip" map).
+    // Driving-route / tracking polyline — navigation blue (#2F6FED).
     if (widget.routePolyline != null && widget.routePolyline!.isNotEmpty) {
       final points = decodePolyline(widget.routePolyline!);
       if (points.length >= 2) {
         polylines.add(Polyline(
           polylineId: const PolylineId('route'),
           points: points,
-          color: HexColor('#FFD546'),
-          width: 5,
+          color: const Color(0xFF2F6FED),
+          width: 6,
         ));
       }
     }
@@ -277,13 +300,31 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
       ));
     }
 
-    // Driver marker
+    // Driver marker. In navigation mode (start-trip / on-route nav view) it's
+    // a flat heading arrow that rotates toward the destination — the turn-by-
+    // turn look. Otherwise it's the blue concentric "current location" pin.
     if (widget.driverLat != null && widget.driverLng != null &&
         widget.driverLat != 0 && widget.driverLng != 0) {
+      final useNavArrow = widget.navigationMode &&
+          _navArrowIcon != null &&
+          _isValid(widget.focusLat, widget.focusLng);
+      final heading = useNavArrow
+          ? _bearing(widget.driverLat!, widget.driverLng!,
+              widget.focusLat!, widget.focusLng!)
+          : 0.0;
       markers.add(Marker(
         markerId: const MarkerId('driver'),
         position: LatLng(widget.driverLat!, widget.driverLng!),
-        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
+        icon: useNavArrow
+            ? _navArrowIcon!
+            : (_driverIcon ??
+                BitmapDescriptor.defaultMarkerWithHue(
+                    BitmapDescriptor.hueAzure)),
+        // Arrow sits flat on the map and rotates with heading; the pin stays
+        // upright anchored at its tip.
+        anchor: useNavArrow ? const Offset(0.5, 0.5) : const Offset(0.5, 1.0),
+        rotation: heading,
+        flat: useNavArrow,
         infoWindow: const InfoWindow(title: 'Driver'),
       ));
     }
@@ -383,6 +424,19 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
         child: Icon(icon, size: 20, color: Colors.black87),
       ),
     );
+  }
+
+  /// Initial bearing (degrees, 0–360) from one lat/lng to another, used to
+  /// orient the navigation camera so the driver's heading points "up".
+  double _bearing(double lat1, double lng1, double lat2, double lng2) {
+    final phi1 = lat1 * math.pi / 180;
+    final phi2 = lat2 * math.pi / 180;
+    final dLng = (lng2 - lng1) * math.pi / 180;
+    final y = math.sin(dLng) * math.cos(phi2);
+    final x = math.cos(phi1) * math.sin(phi2) -
+        math.sin(phi1) * math.cos(phi2) * math.cos(dLng);
+    final deg = math.atan2(y, x) * 180 / math.pi;
+    return (deg + 360) % 360;
   }
 
   double _min(double a, double b, double? c) {

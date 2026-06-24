@@ -1,31 +1,28 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:get/get.dart';
 import 'package:hexcolor/hexcolor.dart';
 import 'package:kebu_driver/AppNavigation/app_navigation.dart';
-import 'package:kebu_driver/Screens/on_boarding_screens/household_address_screen.dart';
+import 'package:kebu_driver/Screens/on_boarding_screens/household_bank_details_screen.dart';
 import 'package:kebu_driver/Screens/on_boarding_screens/onboarding_api_service.dart';
-import 'package:kebu_driver/Screens/on_boarding_screens/onboarding_controller.dart';
 import 'package:kebu_driver/Utils/CustomToast/custome_toast.dart';
 
-/// Household partner onboarding — first screen ("Personal Details").
+/// Household partner onboarding — third screen ("Work Details").
 ///
-/// Fully backend-driven: the field list, labels, validation and dropdown
-/// options are fetched from `/onboarding/household/personal-info` and rendered
-/// dynamically, so the form can change without an app release. Matches the
-/// Figma "Personal Info" design (blue header + 4-step indicator).
-class HouseholdPersonalInfoScreen extends StatefulWidget {
-  const HouseholdPersonalInfoScreen({super.key});
+/// Fully backend-driven: the field list, labels and validation are fetched from
+/// `/onboarding/household/work-details`, and the business "category →
+/// sub-category" dropdowns are populated from the live ServiceCategory tree the
+/// same endpoint returns (cascading, no hardcoded data). Matches the Figma
+/// "Work Details" design (blue header + 4-step indicator).
+class HouseholdWorkDetailsScreen extends StatefulWidget {
+  const HouseholdWorkDetailsScreen({super.key});
 
   @override
-  State<HouseholdPersonalInfoScreen> createState() =>
-      _HouseholdPersonalInfoScreenState();
+  State<HouseholdWorkDetailsScreen> createState() =>
+      _HouseholdWorkDetailsScreenState();
 }
 
-class _HouseholdPersonalInfoScreenState
-    extends State<HouseholdPersonalInfoScreen> {
-  final OnboardingController _controller = Get.find<OnboardingController>();
-
+class _HouseholdWorkDetailsScreenState
+    extends State<HouseholdWorkDetailsScreen> {
   // Theme tokens lifted straight from the Figma design.
   static final Color _primary = HexColor("#2C54C1");
   static final Color _bg = HexColor("#F8FAFC");
@@ -36,15 +33,18 @@ class _HouseholdPersonalInfoScreenState
   bool _loading = true;
   bool _saving = false;
 
-  String _title = "Personal Details";
+  String _title = "Work Details";
   List<Map<String, dynamic>> _fields = [];
   List<Map<String, dynamic>> _steps = [];
-  int _currentStep = 0;
+  int _currentStep = 2;
 
-  // Per-field state, keyed by field `key`.
+  // Parent categories: [{ id, name, subCategories: [{id, name}] }].
+  List<Map<String, dynamic>> _categoryTree = [];
+
+  // Per-field state keyed by field `key`. Dropdown values hold the selected id
+  // (categories) or the raw string (static / business type).
   final Map<String, TextEditingController> _textControllers = {};
   final Map<String, String?> _dropdownValues = {};
-  final Map<String, List<String>> _multiValues = {};
 
   @override
   void initState() {
@@ -62,7 +62,7 @@ class _HouseholdPersonalInfoScreenState
 
   Future<void> _loadConfig() async {
     setState(() => _loading = true);
-    final res = await OnboardingApiService.getHouseholdPersonalInfo();
+    final res = await OnboardingApiService.getHouseholdWorkDetails();
     if (!mounted) return;
 
     if (!res.success || res.data == null) {
@@ -81,6 +81,10 @@ class _HouseholdPersonalInfoScreenState
         .whereType<Map>()
         .map((e) => Map<String, dynamic>.from(e))
         .toList();
+    final tree = (data['categoryTree'] as List? ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
     final prefill = (data['prefill'] is Map)
         ? Map<String, dynamic>.from(data['prefill'])
         : <String, dynamic>{};
@@ -90,36 +94,75 @@ class _HouseholdPersonalInfoScreenState
       final type = (f['type'] ?? 'text').toString();
       final pre = prefill[key];
 
-      switch (type) {
-        case 'multiselect':
-          _multiValues[key] = (pre is List)
-              ? pre.map((e) => e.toString()).toList()
-              : <String>[];
-          break;
-        case 'dropdown':
-          _dropdownValues[key] =
-              (pre != null && pre.toString().isNotEmpty) ? pre.toString() : null;
-          break;
-        default: // text / phone
-          final ctrl = TextEditingController();
-          if (key == 'mobileNumber') {
-            final code = (prefill['countryCode'] ?? '+91').toString();
-            final mobile = (pre ?? '').toString();
-            ctrl.text = mobile.isEmpty ? code : '$code $mobile';
-          } else if (pre != null) {
-            ctrl.text = pre.toString();
-          }
-          _textControllers[key] = ctrl;
+      if (type == 'dropdown') {
+        _dropdownValues[key] =
+            (pre != null && pre.toString().isNotEmpty) ? pre.toString() : null;
+      } else {
+        final ctrl = TextEditingController();
+        if (pre != null) ctrl.text = pre.toString();
+        _textControllers[key] = ctrl;
       }
     }
 
     setState(() {
-      _title = (data['title'] ?? 'Personal Details').toString();
+      _title = (data['title'] ?? 'Work Details').toString();
       _fields = fields;
       _steps = steps;
-      _currentStep = (data['currentStep'] is int) ? data['currentStep'] : 0;
+      _categoryTree = tree;
+      _currentStep = (data['currentStep'] is int) ? data['currentStep'] : 2;
       _loading = false;
     });
+  }
+
+  // ── Option resolution for the cascading category dropdowns ──
+
+  /// The selectable options for a dropdown field as {id, name} pairs.
+  List<Map<String, String>> _optionsFor(Map<String, dynamic> f) {
+    final source = (f['optionsSource'] ?? '').toString();
+
+    switch (source) {
+      case 'category':
+        return _categoryTree
+            .map((p) => {
+                  'id': (p['id'] ?? '').toString(),
+                  'name': (p['name'] ?? '').toString(),
+                })
+            .toList();
+      case 'subcategory':
+        final parentKey = (f['dependsOn'] ?? '').toString();
+        final parentId = _dropdownValues[parentKey];
+        if (parentId == null || parentId.isEmpty) return [];
+        final parent = _categoryTree.firstWhere(
+          (p) => (p['id'] ?? '').toString() == parentId,
+          orElse: () => <String, dynamic>{},
+        );
+        final subs = (parent['subCategories'] as List? ?? const [])
+            .whereType<Map>()
+            .map((e) => {
+                  'id': (e['id'] ?? '').toString(),
+                  'name': (e['name'] ?? '').toString(),
+                })
+            .toList();
+        return subs;
+      default: // "static"
+        return (f['options'] as List? ?? const [])
+            .map((e) => {'id': e.toString(), 'name': e.toString()})
+            .toList();
+    }
+  }
+
+  /// Display label for the current selection of a dropdown field.
+  String _selectedLabel(Map<String, dynamic> f) {
+    final key = (f['key'] ?? '').toString();
+    final value = _dropdownValues[key];
+    if (value == null || value.isEmpty) {
+      return (f['placeholder'] ?? 'Select').toString();
+    }
+    final match = _optionsFor(f).firstWhere(
+      (o) => o['id'] == value,
+      orElse: () => <String, String>{},
+    );
+    return match['name'] ?? value;
   }
 
   Map<String, dynamic> _collectBody() {
@@ -127,12 +170,8 @@ class _HouseholdPersonalInfoScreenState
     for (final f in _fields) {
       final key = (f['key'] ?? '').toString();
       final type = (f['type'] ?? 'text').toString();
-      final readOnly = f['readOnly'] == true;
-      if (key.isEmpty || readOnly) continue;
-
-      if (type == 'multiselect') {
-        body[key] = _multiValues[key] ?? <String>[];
-      } else if (type == 'dropdown') {
+      if (key.isEmpty || f['readOnly'] == true) continue;
+      if (type == 'dropdown') {
         body[key] = _dropdownValues[key] ?? '';
       } else {
         body[key] = _textControllers[key]?.text.trim() ?? '';
@@ -147,10 +186,9 @@ class _HouseholdPersonalInfoScreenState
       final key = (f['key'] ?? '').toString();
       final label = (f['label'] ?? 'This field').toString();
       final val = body[key];
-      final empty = val == null ||
-          (val is String && val.trim().isEmpty) ||
-          (val is List && val.isEmpty);
-      if (empty) return '$label is required.';
+      if (val == null || val.toString().trim().isEmpty) {
+        return '$label is required.';
+      }
     }
     return null;
   }
@@ -164,25 +202,20 @@ class _HouseholdPersonalInfoScreenState
     }
 
     setState(() => _saving = true);
-    final res = await OnboardingApiService.saveHouseholdPersonalInfo(body: body);
+    final res = await OnboardingApiService.saveHouseholdWorkDetails(body: body);
     if (!mounted) return;
     setState(() => _saving = false);
 
     if (!res.success) {
-      showCustomToast(context, res.message ?? 'Failed to save details.');
+      showCustomToast(context, res.message ?? 'Failed to save work details.');
       return;
     }
 
-    // Keep the shared onboarding controller in sync for downstream steps.
-    _controller.serviceType.value = 'cleaning';
-    _controller.nameController.text = (body['fullName'] ?? '').toString();
-    _controller.emailController.text = (body['email'] ?? '').toString();
-
     if (advance) {
-      // Household onboarding flow: Personal Details → Address → Work → Bank.
-      pushTo(context, const HouseholdAddressScreen());
+      // Household onboarding flow: Work Details → Bank Details (final step).
+      pushTo(context, const HouseholdBankDetailsScreen());
     } else {
-      showCustomToast(context, 'Details saved.');
+      showCustomToast(context, 'Work details saved.');
     }
   }
 
@@ -291,21 +324,22 @@ class _HouseholdPersonalInfoScreenState
   }
 
   Widget _stepNode(int index) {
+    // Completed steps (before the current one) show a blue check; the current
+    // and future steps show an empty circle — matches the Figma "Work Details"
+    // step (Personal Details + Address both checked).
     final done = index < _currentStep;
-    final current = index == _currentStep;
-    final filled = done || current;
     return Container(
       width: 24,
       height: 24,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: filled ? _primary : Colors.white,
+        color: done ? _primary : Colors.white,
         border: Border.all(
-          color: filled ? _primary : HexColor("#848484"),
+          color: done ? _primary : HexColor("#848484"),
           width: 1.5,
         ),
       ),
-      child: (done || current)
+      child: done
           ? const Icon(Icons.check, color: Colors.white, size: 14)
           : Center(
               child: Container(
@@ -330,7 +364,7 @@ class _HouseholdPersonalInfoScreenState
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _sectionHeader("PERSONAL DETAILS"),
+            _sectionHeader("Work Details"),
             const SizedBox(height: 20),
             ..._fields.map(_buildField),
             const SizedBox(height: 8),
@@ -362,17 +396,7 @@ class _HouseholdPersonalInfoScreenState
 
   Widget _buildField(Map<String, dynamic> f) {
     final type = (f['type'] ?? 'text').toString();
-    Widget input;
-    switch (type) {
-      case 'dropdown':
-        input = _dropdownInput(f);
-        break;
-      case 'multiselect':
-        input = _multiSelectInput(f);
-        break;
-      default:
-        input = _textInput(f);
-    }
+    final input = type == 'dropdown' ? _dropdownInput(f) : _textInput(f);
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 20),
@@ -459,13 +483,11 @@ class _HouseholdPersonalInfoScreenState
 
   Widget _dropdownInput(Map<String, dynamic> f) {
     final key = (f['key'] ?? '').toString();
-    final placeholder = (f['placeholder'] ?? 'Select').toString();
-    final options =
-        (f['options'] as List? ?? const []).map((e) => e.toString()).toList();
-    final selected = _dropdownValues[key];
+    final value = _dropdownValues[key];
+    final hasValue = value != null && value.isNotEmpty;
 
     return InkWell(
-      onTap: () => _openDropdownSheet(key, f['label']?.toString() ?? '', options),
+      onTap: () => _openDropdownSheet(f),
       child: Container(
         decoration: _boxDecoration,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -473,42 +495,11 @@ class _HouseholdPersonalInfoScreenState
           children: [
             Expanded(
               child: Text(
-                selected ?? placeholder,
-                style: TextStyle(
-                  color: selected == null ? _hintColor : _labelColor,
-                  fontSize: 15,
-                ),
-              ),
-            ),
-            Icon(Icons.keyboard_arrow_down_rounded, color: _labelColor, size: 22),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _multiSelectInput(Map<String, dynamic> f) {
-    final key = (f['key'] ?? '').toString();
-    final placeholder = (f['placeholder'] ?? 'Select').toString();
-    final options =
-        (f['options'] as List? ?? const []).map((e) => e.toString()).toList();
-    final selected = _multiValues[key] ?? <String>[];
-
-    return InkWell(
-      onTap: () =>
-          _openMultiSelectSheet(key, f['label']?.toString() ?? '', options),
-      child: Container(
-        decoration: _boxDecoration,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                selected.isEmpty ? placeholder : selected.join(', '),
+                _selectedLabel(f),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  color: selected.isEmpty ? _hintColor : _labelColor,
+                  color: hasValue ? _labelColor : _hintColor,
                   fontSize: 15,
                 ),
               ),
@@ -520,7 +511,26 @@ class _HouseholdPersonalInfoScreenState
     );
   }
 
-  void _openDropdownSheet(String key, String title, List<String> options) {
+  void _openDropdownSheet(Map<String, dynamic> f) {
+    final key = (f['key'] ?? '').toString();
+    final source = (f['optionsSource'] ?? '').toString();
+    final options = _optionsFor(f);
+
+    if (options.isEmpty) {
+      // Sub-category dropdowns are empty until their parent category is chosen.
+      if (source == 'subcategory') {
+        final parentKey = (f['dependsOn'] ?? '').toString();
+        final parentLabel = _fields.firstWhere(
+          (e) => (e['key'] ?? '') == parentKey,
+          orElse: () => {'label': 'category'},
+        )['label'];
+        showCustomToast(context, 'Please select $parentLabel first.');
+      } else {
+        showCustomToast(context, 'No options available.');
+      }
+      return;
+    }
+
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.white,
@@ -532,7 +542,7 @@ class _HouseholdPersonalInfoScreenState
           mainAxisSize: MainAxisSize.min,
           children: [
             const SizedBox(height: 12),
-            Text(title,
+            Text((f['label'] ?? '').toString(),
                 style: TextStyle(
                     color: _labelColor,
                     fontSize: 16,
@@ -542,15 +552,20 @@ class _HouseholdPersonalInfoScreenState
               child: ListView(
                 shrinkWrap: true,
                 children: options.map((opt) {
-                  final isSel = _dropdownValues[key] == opt;
+                  final id = opt['id'] ?? '';
+                  final isSel = _dropdownValues[key] == id;
                   return ListTile(
-                    title: Text(opt,
+                    title: Text(opt['name'] ?? '',
                         style: TextStyle(color: _labelColor, fontSize: 15)),
-                    trailing: isSel
-                        ? Icon(Icons.check, color: _primary)
-                        : null,
+                    trailing:
+                        isSel ? Icon(Icons.check, color: _primary) : null,
                     onTap: () {
-                      setState(() => _dropdownValues[key] = opt);
+                      setState(() {
+                        _dropdownValues[key] = id;
+                        // Cascade: changing a parent category clears the
+                        // dependent sub-category selection.
+                        _clearDependents(key);
+                      });
                       Navigator.pop(ctx);
                     },
                   );
@@ -564,78 +579,13 @@ class _HouseholdPersonalInfoScreenState
     );
   }
 
-  void _openMultiSelectSheet(String key, String title, List<String> options) {
-    final current = List<String>.from(_multiValues[key] ?? <String>[]);
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheet) => SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const SizedBox(height: 12),
-              Text(title,
-                  style: TextStyle(
-                      color: _labelColor,
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              Flexible(
-                child: ListView(
-                  shrinkWrap: true,
-                  children: options.map((opt) {
-                    final isSel = current.contains(opt);
-                    return CheckboxListTile(
-                      value: isSel,
-                      activeColor: _primary,
-                      controlAffinity: ListTileControlAffinity.leading,
-                      title: Text(opt,
-                          style: TextStyle(color: _labelColor, fontSize: 15)),
-                      onChanged: (v) {
-                        setSheet(() {
-                          if (v == true) {
-                            current.add(opt);
-                          } else {
-                            current.remove(opt);
-                          }
-                        });
-                      },
-                    );
-                  }).toList(),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _primary,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8)),
-                    ),
-                    onPressed: () {
-                      setState(() => _multiValues[key] = current);
-                      Navigator.pop(ctx);
-                    },
-                    child: const Text("Done",
-                        style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold)),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
+  /// Clears any dropdown whose `dependsOn` points at [changedKey].
+  void _clearDependents(String changedKey) {
+    for (final f in _fields) {
+      if ((f['dependsOn'] ?? '').toString() == changedKey) {
+        _dropdownValues[(f['key'] ?? '').toString()] = null;
+      }
+    }
   }
 
   Widget _actionButtons() {

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:hexcolor/hexcolor.dart';
@@ -16,6 +18,9 @@ class VerificationScreen extends StatefulWidget {
 
 class _VerificationScreenState extends State<VerificationScreen>
     with WidgetsBindingObserver {
+  Timer? _pollTimer;
+  bool _navigated = false;
+
   @override
   void initState() {
     super.initState();
@@ -23,10 +28,18 @@ class _VerificationScreenState extends State<VerificationScreen>
     // Check status once on entry. If already approved, move the driver forward
     // automatically — the Figma screen exposes no manual "check" action.
     WidgetsBinding.instance.addPostFrameCallback((_) => _checkStatus());
+    // Keep polling while the driver waits on this screen, so an approval (or
+    // rejection) made on the admin panel advances them without needing to
+    // background/reopen the app.
+    _pollTimer = Timer.periodic(
+      const Duration(seconds: 8),
+      (_) => _checkStatus(),
+    );
   }
 
   @override
   void dispose() {
+    _pollTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -39,8 +52,11 @@ class _VerificationScreenState extends State<VerificationScreen>
   }
 
   Future<void> _checkStatus({bool notifyWhenPending = false}) async {
+    // A previous check may already be navigating away; don't fire again.
+    if (_navigated) return;
+
     final res = await DriverApiService.getDashboard();
-    if (!mounted) return;
+    if (!mounted || _navigated) return;
 
     if (res.success && res.data != null) {
       final driver = res.data['driver'];
@@ -48,12 +64,18 @@ class _VerificationScreenState extends State<VerificationScreen>
       final serviceType = driver?['serviceType'] ?? '';
 
       if (status == 'approved') {
+        _navigated = true;
+        _pollTimer?.cancel();
         if (serviceType == 'cleaning') {
           replaceRoute(context, const TechnicianDashboard());
         } else {
           replaceRoute(context, const HomeScreen());
         }
       } else if (status == 'rejected') {
+        // Stop polling and show the reason once, instead of spamming the toast
+        // every poll tick.
+        _navigated = true;
+        _pollTimer?.cancel();
         final reason = driver?['rejectionReason'] ?? '';
         showCustomToast(
             context,

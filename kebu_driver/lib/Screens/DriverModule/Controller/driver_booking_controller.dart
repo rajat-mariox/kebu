@@ -5,6 +5,7 @@ import 'package:fluttertoast/fluttertoast.dart';
 import 'package:get/get.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:kebu_driver/Utils/ApiClient/api_client.dart';
 import 'package:kebu_driver/Services/socket_service.dart';
 
@@ -72,6 +73,18 @@ class DriverBookingController extends GetxController {
   final routePolyline = Rxn<String>();
   // Duration in minutes for the active phase, populated by /driver/app/route.
   final routeDurationMin = Rxn<int>();
+
+  // ── Turn-by-turn voice guidance ──
+  final FlutterTts _tts = FlutterTts();
+  bool _ttsReady = false;
+  /// Reactive banner shown on the active-ride map during navigation.
+  final navInstruction = ''.obs; // e.g. "Turn right onto Polk St"
+  final navDistanceText = ''.obs; // distance to the next maneuver
+  final navManeuver = ''.obs; // e.g. "turn-right" → picks the arrow icon
+  /// Steps for the active leg: {instruction, maneuver, distanceMeters, lat, lng}.
+  List<Map<String, dynamic>> _navSteps = [];
+  int _navStepIndex = 0;
+  String _lastSpoken = '';
   // Encoded polyline of the full trip (pickup → drop), drawn on the
   // take-booking / buzzer map so the driver sees the route up front.
   final tripRoutePolyline = Rxn<String>();
@@ -142,6 +155,7 @@ class DriverBookingController extends GetxController {
     super.onInit();
     _listenToSocket();
     detectCurrentLocation();
+    _initTts();
   }
 
   @override
@@ -152,7 +166,94 @@ class DriverBookingController extends GetxController {
     }
     _positionSub?.cancel();
     _positionSub = null;
+    _tts.stop();
     super.onClose();
+  }
+
+  // ── Voice guidance ───────────────────────────────────────────────
+  Future<void> _initTts() async {
+    try {
+      await _tts.setLanguage('en-US');
+      await _tts.setSpeechRate(0.5);
+      await _tts.setVolume(1.0);
+      _ttsReady = true;
+    } catch (_) {
+      _ttsReady = false;
+    }
+  }
+
+  /// Voice/banner guidance runs ONLY during the trip (pickup → destination),
+  /// not while heading to the pickup — that leg uses the plain tracking map.
+  bool get _navActive => rideState.value == DriverRideState.inProgress;
+
+  /// Store the decoded turn-by-turn steps for the active leg and refresh the
+  /// banner. Called whenever a fresh route arrives from `/driver/app/route`.
+  void _setNavSteps(List raw) {
+    _navSteps = raw
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+    _navStepIndex = 0;
+    _lastSpoken = '';
+    _updateNavGuidance();
+  }
+
+  /// Recompute the next-maneuver banner from the driver's current position,
+  /// advance past maneuvers already reached, and speak each one once when the
+  /// driver gets within announcing range.
+  void _updateNavGuidance() {
+    if (!_navActive || _navSteps.isEmpty) {
+      _clearNav();
+      return;
+    }
+    if (currentLat.value == 0 || currentLng.value == 0) return;
+    if (_navStepIndex >= _navSteps.length) {
+      _clearNav();
+      return;
+    }
+
+    double distTo(Map s) => Geolocator.distanceBetween(
+          currentLat.value,
+          currentLng.value,
+          (s['lat'] as num).toDouble(),
+          (s['lng'] as num).toDouble(),
+        );
+
+    var step = _navSteps[_navStepIndex];
+    var dist = distTo(step);
+    // Skip maneuvers we've already driven past.
+    while (dist < 30 && _navStepIndex < _navSteps.length - 1) {
+      _navStepIndex++;
+      step = _navSteps[_navStepIndex];
+      dist = distTo(step);
+    }
+
+    final instr = (step['instruction'] ?? '').toString();
+    navInstruction.value = instr;
+    navManeuver.value = (step['maneuver'] ?? '').toString();
+    navDistanceText.value = dist >= 1000
+        ? '${(dist / 1000).toStringAsFixed(1)} km'
+        : '${dist.round()} m';
+
+    // Announce each instruction once, when within range.
+    if (instr.isNotEmpty && dist <= 250 && instr != _lastSpoken) {
+      _speak(dist >= 100 ? 'In ${dist.round()} meters, $instr' : instr);
+      _lastSpoken = instr;
+    }
+  }
+
+  Future<void> _speak(String text) async {
+    if (!_ttsReady || text.isEmpty) return;
+    try {
+      await _tts.stop();
+      await _tts.speak(text);
+    } catch (_) {}
+  }
+
+  void _clearNav() {
+    navInstruction.value = '';
+    navDistanceText.value = '';
+    navManeuver.value = '';
   }
 
   void _listenToSocket() {
@@ -278,6 +379,8 @@ class DriverBookingController extends GetxController {
 
       // Refresh Google road-distance for the active ride.
       _maybeRefreshRoadDistance();
+      // Update the turn-by-turn banner / speak the next maneuver.
+      _updateNavGuidance();
     });
   }
 
@@ -341,16 +444,19 @@ class DriverBookingController extends GetxController {
       final meters = km != null ? km * 1000.0 : null;
       final poly = (data['polyline'] as String?) ?? '';
       final durMin = (data['durationMin'] as num?)?.toInt();
+      final steps = data['steps'];
 
       // Guard against stale responses arriving after the phase changed.
       if (isPickupPhase && rideState.value == DriverRideState.navigatingToPickup) {
         if (meters != null) roadDistanceToPickupMeters.value = meters;
         if (poly.isNotEmpty) routePolyline.value = poly;
         if (durMin != null) routeDurationMin.value = durMin;
+        if (steps is List) _setNavSteps(steps);
       } else if (isDropPhase && rideState.value == DriverRideState.inProgress) {
         if (meters != null) roadDistanceToDropMeters.value = meters;
         if (poly.isNotEmpty) routePolyline.value = poly;
         if (durMin != null) routeDurationMin.value = durMin;
+        if (steps is List) _setNavSteps(steps);
       }
     } catch (e) {
       debugPrint('[DriverBookingCtrl] route fetch failed: $e');
@@ -716,6 +822,11 @@ class DriverBookingController extends GetxController {
   }
 
   void resetBooking() {
+    _navSteps = [];
+    _navStepIndex = 0;
+    _lastSpoken = '';
+    _clearNav();
+    _tts.stop();
     rideState.value = DriverRideState.idle;
     bookingId.value = '';
     bookingOtp.value = '';

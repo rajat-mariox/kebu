@@ -7,7 +7,7 @@ import 'package:hexcolor/hexcolor.dart';
 import 'package:pinput/pinput.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:kebu_driver/CommonWidgets/osm_nav_view.dart';
+import 'package:kebu_driver/CommonWidgets/google_map_widget.dart';
 import 'package:kebu_driver/CommonWidgets/swipe_button.dart';
 import 'package:kebu_driver/Screens/DriverModule/Controller/driver_booking_controller.dart';
 import 'package:kebu_driver/Screens/DriverModule/CollectCashScreen/collect_cash_screen.dart';
@@ -180,20 +180,23 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
 
         return Stack(
           children: [
-            // Full-screen free OpenStreetMap navigation (no token/billing):
-            // live-tracks the driver toward the destination with the route
-            // drawn. Replaces the Google map on the start-trip screen.
+            // Map. While heading to pickup it's the normal tracking map (driver
+            // pin + route, framed). Once the trip starts (inProgress) it becomes
+            // the tilted turn-by-turn navigation view (heading arrow + voice).
             Positioned.fill(
-              child: OsmNavView(
+              child: GoogleMapWidget(
                 driverLat: _bc.currentLat.value,
                 driverLng: _bc.currentLng.value,
-                destLat: focusLat,
-                destLng: focusLng,
+                focusLat: focusLat,
+                focusLng: focusLng,
                 pickupLat: _bc.pickupLat.value,
                 pickupLng: _bc.pickupLng.value,
                 dropLat: _bc.dropLat.value,
                 dropLng: _bc.dropLng.value,
                 routePolyline: route,
+                followDriver: true,
+                navigationMode: isInProgress,
+                interactive: true,
                 bottomPadding: screenHeight * 0.5,
               ),
             ),
@@ -210,9 +213,12 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
             // Top yellow app bar
             _appBar(state),
 
+            // Turn-by-turn voice-nav banner (next maneuver + distance). Shown
+            // while heading to pickup or on the trip, whenever guidance is live.
+            _navBanner(),
+
             // Floating destination pill (Figma 131:10576) — shown during
-            // the trip-in-progress phase so the driver always sees where
-            // they're heading even when the bottom sheet is compact.
+            // the trip-in-progress phase. Hidden while the nav banner is up.
             if (isInProgress) _destinationPill(),
 
             // Bottom sheet — content depends on phase. The "On Route" sheet
@@ -341,75 +347,14 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
     );
   }
 
-  /// Figma "At Pickup" CTA (131:10413): yellow button with a white chevron
-  /// box on the left, the label centred and a faded decoration on the right.
+  /// "At Pickup" CTA — now a slide-to-confirm control so the driver must
+  /// deliberately swipe (matching the "Verify Ride" / "Complete" actions)
+  /// instead of an accidental tap.
   Widget _atPickupButton() {
-    final loading = _bc.isLoading.value;
-    return GestureDetector(
-      onTap: loading ? null : _onAtPickupTap,
-      child: SizedBox(
-        height: 48,
-        child: Stack(
-          children: [
-            Positioned.fill(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: _FigmaTokens.yellow,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-              ),
-            ),
-            Positioned(
-              right: 16,
-              top: 0,
-              bottom: 0,
-              child: Center(
-                child: Opacity(
-                  opacity: 0.2,
-                  child: Image.asset('assets/dashboard/button_rect.png',
-                      width: 64, height: 64, fit: BoxFit.contain),
-                ),
-              ),
-            ),
-            Center(
-              child: loading
-                  ? const SizedBox(
-                      width: 22,
-                      height: 22,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        valueColor:
-                            AlwaysStoppedAnimation<Color>(Color(0xFF132234)),
-                      ),
-                    )
-                  : Text(
-                      'At Pickup',
-                      style: GoogleFonts.nunito(
-                        fontSize: 17,
-                        fontWeight: FontWeight.w700,
-                        height: 22 / 17,
-                        color: const Color(0xFF132234),
-                      ),
-                    ),
-            ),
-            Positioned(
-              left: 2,
-              top: 2,
-              bottom: 2,
-              width: 56,
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                alignment: Alignment.center,
-                child: const AssetIcon('assets/dashboard/chevron.svg',
-                    width: 24, height: 20),
-              ),
-            ),
-          ],
-        ),
-      ),
+    return SwipeButton(
+      label: 'Swipe — At Pickup',
+      loading: _bc.isLoading.value,
+      onConfirmed: _onAtPickupTap,
     );
   }
 
@@ -423,12 +368,99 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
 
   // ───────────────────────── destination pill (Figma 131:10576) ─────────────────────────
 
+  // ───────────────────────── turn-by-turn nav banner ─────────────────────────
+
+  /// Google-nav-style banner under the app bar: a maneuver arrow, the distance
+  /// to the next turn, and the spoken instruction. Driven by the controller's
+  /// reactive guidance state; collapses to nothing when no guidance is active.
+  Widget _navBanner() {
+    return Positioned(
+      left: 12,
+      right: 12,
+      top: MediaQuery.of(context).padding.top + 12 + 56,
+      child: Obx(() {
+        final instr = _bc.navInstruction.value;
+        if (instr.isEmpty) return const SizedBox.shrink();
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            color: _FigmaTokens.gray1, // dark nav header
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x33000000),
+                blurRadius: 6,
+                offset: Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              Icon(_maneuverIcon(_bc.navManeuver.value),
+                  color: Colors.white, size: 34),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _bc.navDistanceText.value,
+                      style: GoogleFonts.nunito(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    Text(
+                      instr,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.nunito(
+                        color: Colors.white.withValues(alpha: 0.85),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        height: 18 / 13,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      }),
+    );
+  }
+
+  /// Maps a Google/OSRM maneuver string to a Material turn icon.
+  IconData _maneuverIcon(String m) {
+    final s = m.toLowerCase();
+    if (s.contains('uturn') || s.contains('u-turn')) return Icons.u_turn_left;
+    if (s.contains('left')) return Icons.turn_left;
+    if (s.contains('right')) return Icons.turn_right;
+    if (s.contains('straight') || s.contains('continue')) {
+      return Icons.straight;
+    }
+    if (s.contains('merge')) return Icons.merge_type;
+    if (s.contains('roundabout') || s.contains('rotary')) {
+      return Icons.roundabout_right;
+    }
+    if (s.contains('fork')) return Icons.fork_right;
+    if (s.contains('ramp')) return Icons.ramp_right;
+    if (s.contains('destination') || s.contains('arrive')) return Icons.place;
+    return Icons.navigation;
+  }
+
   /// White rounded pill floating just under the app bar that shows the
-  /// drop address while the trip is in progress.
+  /// drop address while the trip is in progress. Hidden while the turn-by-turn
+  /// nav banner is showing (they occupy the same slot).
   Widget _destinationPill() {
     final addr = _bc.dropAddress.value.isNotEmpty
         ? _bc.dropAddress.value
         : 'Drop location';
+    if (_bc.navInstruction.value.isNotEmpty) {
+      return const SizedBox.shrink();
+    }
     return Positioned(
       left: 16,
       right: 16,

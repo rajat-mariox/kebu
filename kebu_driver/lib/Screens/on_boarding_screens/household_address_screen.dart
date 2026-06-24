@@ -3,27 +3,27 @@ import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:hexcolor/hexcolor.dart';
 import 'package:kebu_driver/AppNavigation/app_navigation.dart';
-import 'package:kebu_driver/Screens/on_boarding_screens/household_address_screen.dart';
+import 'package:kebu_driver/Screens/on_boarding_screens/household_work_details_screen.dart';
 import 'package:kebu_driver/Screens/on_boarding_screens/onboarding_api_service.dart';
 import 'package:kebu_driver/Screens/on_boarding_screens/onboarding_controller.dart';
 import 'package:kebu_driver/Utils/CustomToast/custome_toast.dart';
 
-/// Household partner onboarding — first screen ("Personal Details").
+/// Household partner onboarding — second screen ("Address").
 ///
-/// Fully backend-driven: the field list, labels, validation and dropdown
-/// options are fetched from `/onboarding/household/personal-info` and rendered
-/// dynamically, so the form can change without an app release. Matches the
-/// Figma "Personal Info" design (blue header + 4-step indicator).
-class HouseholdPersonalInfoScreen extends StatefulWidget {
-  const HouseholdPersonalInfoScreen({super.key});
+/// Fully backend-driven: the section list (current + permanent address), field
+/// labels, validation and dropdown options (e.g. the state list) are fetched
+/// from `/onboarding/household/address` and rendered dynamically, so the form
+/// can change without an app release. Matches the Figma "Address" design (blue
+/// header + 4-step indicator, ADDRESS + PERMANENT ADDRESS sections with a
+/// "Same as Current Address" toggle).
+class HouseholdAddressScreen extends StatefulWidget {
+  const HouseholdAddressScreen({super.key});
 
   @override
-  State<HouseholdPersonalInfoScreen> createState() =>
-      _HouseholdPersonalInfoScreenState();
+  State<HouseholdAddressScreen> createState() => _HouseholdAddressScreenState();
 }
 
-class _HouseholdPersonalInfoScreenState
-    extends State<HouseholdPersonalInfoScreen> {
+class _HouseholdAddressScreenState extends State<HouseholdAddressScreen> {
   final OnboardingController _controller = Get.find<OnboardingController>();
 
   // Theme tokens lifted straight from the Figma design.
@@ -32,19 +32,21 @@ class _HouseholdPersonalInfoScreenState
   static final Color _border = HexColor("#E1E6EF");
   static final Color _labelColor = HexColor("#132235");
   static final Color _hintColor = HexColor("#607080");
+  static final Color _mutedColor = HexColor("#94A3B3");
 
   bool _loading = true;
   bool _saving = false;
 
-  String _title = "Personal Details";
-  List<Map<String, dynamic>> _fields = [];
+  String _title = "Address";
+  List<Map<String, dynamic>> _sections = [];
   List<Map<String, dynamic>> _steps = [];
-  int _currentStep = 0;
+  int _currentStep = 1;
 
-  // Per-field state, keyed by field `key`.
+  bool _sameAsCurrent = false;
+
+  // Per-field controllers / dropdown values keyed by "<sectionKey>.<fieldKey>".
   final Map<String, TextEditingController> _textControllers = {};
   final Map<String, String?> _dropdownValues = {};
-  final Map<String, List<String>> _multiValues = {};
 
   @override
   void initState() {
@@ -60,9 +62,11 @@ class _HouseholdPersonalInfoScreenState
     super.dispose();
   }
 
+  String _fieldId(String sectionKey, String fieldKey) => '$sectionKey.$fieldKey';
+
   Future<void> _loadConfig() async {
     setState(() => _loading = true);
-    final res = await OnboardingApiService.getHouseholdPersonalInfo();
+    final res = await OnboardingApiService.getHouseholdAddress();
     if (!mounted) return;
 
     if (!res.success || res.data == null) {
@@ -73,7 +77,7 @@ class _HouseholdPersonalInfoScreenState
     }
 
     final data = res.data as Map<String, dynamic>;
-    final fields = (data['fields'] as List? ?? const [])
+    final sections = (data['sections'] as List? ?? const [])
         .whereType<Map>()
         .map((e) => Map<String, dynamic>.from(e))
         .toList();
@@ -85,104 +89,143 @@ class _HouseholdPersonalInfoScreenState
         ? Map<String, dynamic>.from(data['prefill'])
         : <String, dynamic>{};
 
-    for (final f in fields) {
-      final key = (f['key'] ?? '').toString();
-      final type = (f['type'] ?? 'text').toString();
-      final pre = prefill[key];
+    for (final section in sections) {
+      final sectionKey = (section['key'] ?? '').toString();
+      final fields = (section['fields'] as List? ?? const [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      final sectionPrefill = (prefill[sectionKey] is Map)
+          ? Map<String, dynamic>.from(prefill[sectionKey])
+          : <String, dynamic>{};
 
-      switch (type) {
-        case 'multiselect':
-          _multiValues[key] = (pre is List)
-              ? pre.map((e) => e.toString()).toList()
-              : <String>[];
-          break;
-        case 'dropdown':
-          _dropdownValues[key] =
+      for (final f in fields) {
+        final fieldKey = (f['key'] ?? '').toString();
+        final type = (f['type'] ?? 'text').toString();
+        final id = _fieldId(sectionKey, fieldKey);
+        final pre = sectionPrefill[fieldKey];
+
+        if (type == 'dropdown') {
+          _dropdownValues[id] =
               (pre != null && pre.toString().isNotEmpty) ? pre.toString() : null;
-          break;
-        default: // text / phone
+        } else {
           final ctrl = TextEditingController();
-          if (key == 'mobileNumber') {
-            final code = (prefill['countryCode'] ?? '+91').toString();
-            final mobile = (pre ?? '').toString();
-            ctrl.text = mobile.isEmpty ? code : '$code $mobile';
-          } else if (pre != null) {
-            ctrl.text = pre.toString();
-          }
-          _textControllers[key] = ctrl;
+          if (pre != null) ctrl.text = pre.toString();
+          _textControllers[id] = ctrl;
+        }
       }
     }
 
     setState(() {
-      _title = (data['title'] ?? 'Personal Details').toString();
-      _fields = fields;
+      _title = (data['title'] ?? 'Address').toString();
+      _sections = sections;
       _steps = steps;
-      _currentStep = (data['currentStep'] is int) ? data['currentStep'] : 0;
+      _currentStep = (data['currentStep'] is int) ? data['currentStep'] : 1;
+      _sameAsCurrent = prefill['sameAsCurrentAddress'] == true;
       _loading = false;
     });
   }
 
-  Map<String, dynamic> _collectBody() {
-    final body = <String, dynamic>{};
-    for (final f in _fields) {
-      final key = (f['key'] ?? '').toString();
-      final type = (f['type'] ?? 'text').toString();
-      final readOnly = f['readOnly'] == true;
-      if (key.isEmpty || readOnly) continue;
+  Map<String, dynamic> _collectSection(Map<String, dynamic> section) {
+    final sectionKey = (section['key'] ?? '').toString();
+    final fields = (section['fields'] as List? ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
 
-      if (type == 'multiselect') {
-        body[key] = _multiValues[key] ?? <String>[];
-      } else if (type == 'dropdown') {
-        body[key] = _dropdownValues[key] ?? '';
+    final values = <String, dynamic>{};
+    for (final f in fields) {
+      final fieldKey = (f['key'] ?? '').toString();
+      final type = (f['type'] ?? 'text').toString();
+      final id = _fieldId(sectionKey, fieldKey);
+      if (type == 'dropdown') {
+        values[fieldKey] = _dropdownValues[id] ?? '';
       } else {
-        body[key] = _textControllers[key]?.text.trim() ?? '';
+        values[fieldKey] = _textControllers[id]?.text.trim() ?? '';
       }
     }
-    return body;
+    return values;
   }
 
-  String? _validate(Map<String, dynamic> body) {
-    for (final f in _fields) {
+  /// Validates a section against its `required` field config. Returns the first
+  /// error message, or null when valid.
+  String? _validateSection(Map<String, dynamic> section, String sectionLabel) {
+    final fields = (section['fields'] as List? ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+    final values = _collectSection(section);
+
+    for (final f in fields) {
       if (f['required'] != true || f['readOnly'] == true) continue;
-      final key = (f['key'] ?? '').toString();
+      final fieldKey = (f['key'] ?? '').toString();
       final label = (f['label'] ?? 'This field').toString();
-      final val = body[key];
-      final empty = val == null ||
-          (val is String && val.trim().isEmpty) ||
-          (val is List && val.isEmpty);
-      if (empty) return '$label is required.';
+      final val = values[fieldKey];
+      if (val == null || val.toString().trim().isEmpty) {
+        return '$sectionLabel: $label is required.';
+      }
+    }
+    return null;
+  }
+
+  Map<String, dynamic>? _sectionByKey(String key) {
+    for (final s in _sections) {
+      if ((s['key'] ?? '').toString() == key) return s;
     }
     return null;
   }
 
   Future<void> _save({required bool advance}) async {
-    final body = _collectBody();
-    final err = _validate(body);
-    if (err != null) {
-      showCustomToast(context, err);
+    final current = _sectionByKey('current');
+    final permanent = _sectionByKey('permanent');
+    if (current == null) return;
+
+    final currentErr = _validateSection(current, 'Current Address');
+    if (currentErr != null) {
+      showCustomToast(context, currentErr);
       return;
+    }
+    if (!_sameAsCurrent && permanent != null) {
+      final permanentErr = _validateSection(permanent, 'Permanent Address');
+      if (permanentErr != null) {
+        showCustomToast(context, permanentErr);
+        return;
+      }
+    }
+
+    final body = <String, dynamic>{
+      'current': _collectSection(current),
+      'sameAsCurrentAddress': _sameAsCurrent,
+    };
+    if (permanent != null && !_sameAsCurrent) {
+      body['permanent'] = _collectSection(permanent);
     }
 
     setState(() => _saving = true);
-    final res = await OnboardingApiService.saveHouseholdPersonalInfo(body: body);
+    final res = await OnboardingApiService.saveHouseholdAddress(body: body);
     if (!mounted) return;
     setState(() => _saving = false);
 
     if (!res.success) {
-      showCustomToast(context, res.message ?? 'Failed to save details.');
+      showCustomToast(context, res.message ?? 'Failed to save address.');
       return;
     }
 
     // Keep the shared onboarding controller in sync for downstream steps.
-    _controller.serviceType.value = 'cleaning';
-    _controller.nameController.text = (body['fullName'] ?? '').toString();
-    _controller.emailController.text = (body['email'] ?? '').toString();
+    final cur = _collectSection(current);
+    _controller.addressController.text = (cur['address'] ?? '').toString();
+    _controller.apartmentController.text = (cur['apartment'] ?? '').toString();
+    _controller.zipCodeController.text = (cur['zipCode'] ?? '').toString();
+    _controller.selectedState.value = (cur['state'] ?? '').toString();
+    _controller.selectedCity.value = (cur['city'] ?? '').toString();
+    _controller.selectedCountry.value =
+        (cur['country'] ?? 'India').toString();
 
     if (advance) {
-      // Household onboarding flow: Personal Details → Address → Work → Bank.
-      pushTo(context, const HouseholdAddressScreen());
+      // Household onboarding flow: Address → Work Details → Bank Details.
+      pushTo(context, const HouseholdWorkDetailsScreen());
     } else {
-      showCustomToast(context, 'Details saved.');
+      showCustomToast(context, 'Address saved.');
     }
   }
 
@@ -291,21 +334,21 @@ class _HouseholdPersonalInfoScreenState
   }
 
   Widget _stepNode(int index) {
+    // Completed steps (before the current one) show a blue check; the current
+    // and future steps show an empty circle — matches the Figma "Address" step.
     final done = index < _currentStep;
-    final current = index == _currentStep;
-    final filled = done || current;
     return Container(
       width: 24,
       height: 24,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: filled ? _primary : Colors.white,
+        color: done ? _primary : Colors.white,
         border: Border.all(
-          color: filled ? _primary : HexColor("#848484"),
+          color: done ? _primary : HexColor("#848484"),
           width: 1.5,
         ),
       ),
-      child: (done || current)
+      child: done
           ? const Icon(Icons.check, color: Colors.white, size: 14)
           : Center(
               child: Container(
@@ -323,20 +366,50 @@ class _HouseholdPersonalInfoScreenState
   // ── Form body ──
   Widget _form() {
     return SingleChildScrollView(
-      child: Container(
-        color: Colors.white,
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _sectionHeader("PERSONAL DETAILS"),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ..._sections.map(_buildSection),
+          Container(
+            color: Colors.white,
+            width: double.infinity,
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+            child: _actionButtons(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSection(Map<String, dynamic> section) {
+    final sectionKey = (section['key'] ?? '').toString();
+    final title = (section['title'] ?? '').toString();
+    final supportsSameAsCurrent = section['supportsSameAsCurrent'] == true;
+    final fields = (section['fields'] as List? ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+
+    // When "Same as Current Address" is selected the permanent fields collapse.
+    final showFields = !(supportsSameAsCurrent && _sameAsCurrent);
+
+    return Container(
+      color: Colors.white,
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _sectionHeader(title),
+          const SizedBox(height: 20),
+          if (supportsSameAsCurrent) ...[
+            _sameAsCurrentToggle(),
             const SizedBox(height: 20),
-            ..._fields.map(_buildField),
-            const SizedBox(height: 8),
-            _actionButtons(),
           ],
-        ),
+          if (showFields)
+            ...fields.map((f) => _buildField(sectionKey, f)),
+        ],
       ),
     );
   }
@@ -360,19 +433,41 @@ class _HouseholdPersonalInfoScreenState
     );
   }
 
-  Widget _buildField(Map<String, dynamic> f) {
+  Widget _sameAsCurrentToggle() {
+    return InkWell(
+      onTap: () => setState(() => _sameAsCurrent = !_sameAsCurrent),
+      child: Row(
+        children: [
+          Container(
+            width: 22,
+            height: 22,
+            decoration: BoxDecoration(
+              color: _sameAsCurrent ? _primary : Colors.white,
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(
+                color: _sameAsCurrent ? _primary : _border,
+                width: 1.5,
+              ),
+            ),
+            child: _sameAsCurrent
+                ? const Icon(Icons.check, color: Colors.white, size: 16)
+                : null,
+          ),
+          const SizedBox(width: 8),
+          Text(
+            "Same as Current Address",
+            style: TextStyle(color: _labelColor, fontSize: 15),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildField(String sectionKey, Map<String, dynamic> f) {
     final type = (f['type'] ?? 'text').toString();
-    Widget input;
-    switch (type) {
-      case 'dropdown':
-        input = _dropdownInput(f);
-        break;
-      case 'multiselect':
-        input = _multiSelectInput(f);
-        break;
-      default:
-        input = _textInput(f);
-    }
+    final input = type == 'dropdown'
+        ? _dropdownInput(sectionKey, f)
+        : _textInput(sectionKey, f);
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 20),
@@ -390,11 +485,13 @@ class _HouseholdPersonalInfoScreenState
   Widget _fieldLabel(Map<String, dynamic> f) {
     final label = (f['label'] ?? '').toString();
     final required = f['required'] == true;
+    final readOnly = f['readOnly'] == true;
     return RichText(
       text: TextSpan(
         text: label,
         style: TextStyle(
-          color: _labelColor,
+          // Read-only fields (e.g. Country) use the muted label like in Figma.
+          color: readOnly ? _mutedColor : _labelColor,
           fontSize: 12,
           fontWeight: FontWeight.bold,
         ),
@@ -415,12 +512,13 @@ class _HouseholdPersonalInfoScreenState
         borderRadius: BorderRadius.circular(12),
       );
 
-  Widget _textInput(Map<String, dynamic> f) {
-    final key = (f['key'] ?? '').toString();
+  Widget _textInput(String sectionKey, Map<String, dynamic> f) {
+    final fieldKey = (f['key'] ?? '').toString();
     final readOnly = f['readOnly'] == true;
     final placeholder = (f['placeholder'] ?? '').toString();
     final keyboard = (f['keyboard'] ?? 'default').toString();
-    final ctrl = _textControllers[key] ??= TextEditingController();
+    final id = _fieldId(sectionKey, fieldKey);
+    final ctrl = _textControllers[id] ??= TextEditingController();
 
     return Container(
       decoration: _boxDecoration,
@@ -457,15 +555,17 @@ class _HouseholdPersonalInfoScreenState
     }
   }
 
-  Widget _dropdownInput(Map<String, dynamic> f) {
-    final key = (f['key'] ?? '').toString();
+  Widget _dropdownInput(String sectionKey, Map<String, dynamic> f) {
+    final fieldKey = (f['key'] ?? '').toString();
     final placeholder = (f['placeholder'] ?? 'Select').toString();
     final options =
         (f['options'] as List? ?? const []).map((e) => e.toString()).toList();
-    final selected = _dropdownValues[key];
+    final id = _fieldId(sectionKey, fieldKey);
+    final selected = _dropdownValues[id];
 
     return InkWell(
-      onTap: () => _openDropdownSheet(key, f['label']?.toString() ?? '', options),
+      onTap: () =>
+          _openDropdownSheet(id, f['label']?.toString() ?? '', options),
       child: Container(
         decoration: _boxDecoration,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -487,40 +587,11 @@ class _HouseholdPersonalInfoScreenState
     );
   }
 
-  Widget _multiSelectInput(Map<String, dynamic> f) {
-    final key = (f['key'] ?? '').toString();
-    final placeholder = (f['placeholder'] ?? 'Select').toString();
-    final options =
-        (f['options'] as List? ?? const []).map((e) => e.toString()).toList();
-    final selected = _multiValues[key] ?? <String>[];
-
-    return InkWell(
-      onTap: () =>
-          _openMultiSelectSheet(key, f['label']?.toString() ?? '', options),
-      child: Container(
-        decoration: _boxDecoration,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                selected.isEmpty ? placeholder : selected.join(', '),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: selected.isEmpty ? _hintColor : _labelColor,
-                  fontSize: 15,
-                ),
-              ),
-            ),
-            Icon(Icons.keyboard_arrow_down_rounded, color: _labelColor, size: 22),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _openDropdownSheet(String key, String title, List<String> options) {
+  void _openDropdownSheet(String id, String title, List<String> options) {
+    if (options.isEmpty) {
+      showCustomToast(context, 'No options available.');
+      return;
+    }
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.white,
@@ -542,15 +613,14 @@ class _HouseholdPersonalInfoScreenState
               child: ListView(
                 shrinkWrap: true,
                 children: options.map((opt) {
-                  final isSel = _dropdownValues[key] == opt;
+                  final isSel = _dropdownValues[id] == opt;
                   return ListTile(
                     title: Text(opt,
                         style: TextStyle(color: _labelColor, fontSize: 15)),
-                    trailing: isSel
-                        ? Icon(Icons.check, color: _primary)
-                        : null,
+                    trailing:
+                        isSel ? Icon(Icons.check, color: _primary) : null,
                     onTap: () {
-                      setState(() => _dropdownValues[key] = opt);
+                      setState(() => _dropdownValues[id] = opt);
                       Navigator.pop(ctx);
                     },
                   );
@@ -559,80 +629,6 @@ class _HouseholdPersonalInfoScreenState
             ),
             const SizedBox(height: 8),
           ],
-        ),
-      ),
-    );
-  }
-
-  void _openMultiSelectSheet(String key, String title, List<String> options) {
-    final current = List<String>.from(_multiValues[key] ?? <String>[]);
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheet) => SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const SizedBox(height: 12),
-              Text(title,
-                  style: TextStyle(
-                      color: _labelColor,
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              Flexible(
-                child: ListView(
-                  shrinkWrap: true,
-                  children: options.map((opt) {
-                    final isSel = current.contains(opt);
-                    return CheckboxListTile(
-                      value: isSel,
-                      activeColor: _primary,
-                      controlAffinity: ListTileControlAffinity.leading,
-                      title: Text(opt,
-                          style: TextStyle(color: _labelColor, fontSize: 15)),
-                      onChanged: (v) {
-                        setSheet(() {
-                          if (v == true) {
-                            current.add(opt);
-                          } else {
-                            current.remove(opt);
-                          }
-                        });
-                      },
-                    );
-                  }).toList(),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _primary,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8)),
-                    ),
-                    onPressed: () {
-                      setState(() => _multiValues[key] = current);
-                      Navigator.pop(ctx);
-                    },
-                    child: const Text("Done",
-                        style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold)),
-                  ),
-                ),
-              ),
-            ],
-          ),
         ),
       ),
     );
