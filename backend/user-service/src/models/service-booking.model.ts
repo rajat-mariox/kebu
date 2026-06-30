@@ -29,8 +29,8 @@ export interface IServiceBooking {
     landmark?: string;
     lat: number;
     lng: number;
-    city: string;
-    pincode: string;
+    city?: string;
+    pincode?: string;
   };
 
   // Pricing
@@ -38,6 +38,9 @@ export interface IServiceBooking {
   actualCost?: number;
   discount: number;
   finalCost?: number;
+  // Extra charge the provider adds while completing the work (e.g. parts).
+  extraAmount?: number;
+  extraAmountReason?: string;
   promoCode?: string;
   paymentMethod: "CASH" | "WALLET" | "CARD" | "UPI";
   paymentStatus: "PENDING" | "PAID" | "FAILED" | "REFUNDED";
@@ -72,6 +75,15 @@ export interface IServiceBooking {
   // Images
   beforeImages?: string[];
   afterImages?: string[];
+
+  // Photos the provider captures when starting the service (Figma "Service
+  // details" photo step).
+  serviceStartPhotos?: {
+    selfie?: string;
+    devicePhoto?: string;
+    serialPhoto?: string;
+    otherPhoto?: string;
+  };
 
   createdAt?: Date;
   updatedAt?: Date;
@@ -108,14 +120,17 @@ const ServiceBookingSchema = new Schema<IServiceBooking>(
       landmark: String,
       lat: { type: Number, required: true },
       lng: { type: Number, required: true },
-      city: { type: String, required: true },
-      pincode: { type: String, required: true },
+      // Optional — a GPS-pin booking may not resolve city/pincode.
+      city: { type: String, default: "" },
+      pincode: { type: String, default: "" },
     },
 
     estimatedCost: Number,
     actualCost: Number,
     discount: { type: Number, default: 0 },
     finalCost: Number,
+    extraAmount: { type: Number, default: 0 },
+    extraAmountReason: { type: String, default: "" },
     promoCode: { type: String, uppercase: true },
     multipleBookingId: {
       type: Schema.Types.ObjectId,
@@ -172,6 +187,13 @@ const ServiceBookingSchema = new Schema<IServiceBooking>(
 
     beforeImages: [String],
     afterImages: [String],
+
+    serviceStartPhotos: {
+      selfie: { type: String, default: "" },
+      devicePhoto: { type: String, default: "" },
+      serialPhoto: { type: String, default: "" },
+      otherPhoto: { type: String, default: "" },
+    },
   },
   { timestamps: true },
 );

@@ -270,6 +270,7 @@ export interface HouseholdServiceHours {
   timezone: string;
   isEnabled: boolean;
   closedMessage?: string;
+  arrivalEta?: string;
   isOpen?: boolean;
   reason?: string;
 }

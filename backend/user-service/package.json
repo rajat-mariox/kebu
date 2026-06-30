@@ -12,6 +12,13 @@
     "start": "node dist/server.js",
     "seed:admin": "npx ts-node src/seeds/admin.seed.ts",
     "seed:household": "npx ts-node src/seeds/household-services.seed.ts",
+    "seed:figma-services": "npx ts-node src/seeds/import-figma-services.ts",
+    "reset:service-bookings": "npx ts-node src/seeds/cancel-stuck-service-bookings.ts",
+    "diagnose:service": "npx ts-node src/seeds/diagnose-service-bookings.ts",
+    "demo:create": "npx ts-node src/seeds/demo-service-booking.ts",
+    "demo:remove": "npx ts-node src/seeds/demo-service-booking.ts --remove",
+    "demo:household:remove": "npx ts-node src/seeds/remove-household-demo-bookings.ts",
+    "test:service-flow": "npx ts-node src/seeds/test-service-flow.ts",
     "seed:vehicles": "npx ts-node src/seeds/vehicle-types.seed.ts",
     "seed:faq": "npx ts-node src/seeds/faq.seed.ts",
     "seed:plans": "npx ts-node src/seeds/subscription-plans.seed.ts"

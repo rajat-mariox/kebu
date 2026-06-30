@@ -29,6 +29,15 @@ interface SocketUser {
 const connectedUsers = new Map<string, SocketUser>();
 const connectedDrivers = new Map<string, SocketUser>();
 const otpAttempts = new Map<string, number>();
+
+// Mobile sockets drop constantly (app backgrounded, screen off, network
+// handover) without the driver actually going offline. Instead of flipping a
+// driver offline the instant their socket drops — which yanks their marker off
+// every customer's map and can hide an idle-but-online driver — we wait out
+// this grace period and cancel it if they reconnect. A genuinely-closed app is
+// still marked offline once the grace expires.
+const DRIVER_OFFLINE_GRACE_MS = 90 * 1000;
+const pendingDriverOffline = new Map<string, NodeJS.Timeout>();
 const MAX_OTP_ATTEMPTS = 5;
 
 /**
@@ -106,6 +115,13 @@ export const initializeSocket = async (
 
     if (userType === "driver") {
       connectedDrivers.set(userId, { id: userId, type: "driver", socketId: socket.id });
+      // Reconnected within the grace window — cancel the pending offline so a
+      // brief drop doesn't flip them offline after they're already back.
+      const pending = pendingDriverOffline.get(userId);
+      if (pending) {
+        clearTimeout(pending);
+        pendingDriverOffline.delete(userId);
+      }
     } else {
       connectedUsers.set(userId, { id: userId, type: "user", socketId: socket.id });
       // Shared room for all customers — lets the server fan-out driver
@@ -668,6 +684,26 @@ export const initializeSocket = async (
           });
         }
 
+        // Clear the pending request card from every driver that was offered
+        // this ride while it was still SEARCHING (buzzer), so it disappears
+        // from their app instantly. The assigned driver — if any — was already
+        // notified above. Without this, cancelling a SEARCHING ride leaves the
+        // request on each notified driver's screen until their 30s timer
+        // expires (the REST cancel path does this fan-out, but the socket
+        // cancel usually flips the booking to CANCELLED first, so the REST
+        // handler bails out before reaching it).
+        const assignedDriverId = booking?.driverId?.toString();
+        if (Array.isArray(booking?.notifiedDriverIds)) {
+          for (const nid of booking.notifiedDriverIds) {
+            if (assignedDriverId && nid.toString() === assignedDriverId) continue;
+            io.to(`driver_${nid}`).emit("ride_cancelled", {
+              bookingId: booking?._id,
+              cancelledBy: "USER",
+              reason,
+            });
+          }
+        }
+
         socket.emit("ride_cancelled_confirmed", { booking: updatedBooking });
       } catch (error) {
         console.error("Error cancelling ride:", error);
@@ -745,18 +781,31 @@ export const initializeSocket = async (
 
       if (userType === "driver") {
         connectedDrivers.delete(userId);
-        try {
-          const driverId = new Types.ObjectId(userId);
-          await DriverService.updateDriver(driverId, { isOnline: false });
-          await DriverVehicleService.setDriverVehiclesOnline(driverId, false);
-          // Driver dropped connection → remove their marker from customer maps.
-          io.to("customers").emit("driver_status_changed", {
-            driverId: userId,
-            isOnline: false,
-          });
-        } catch (error) {
-          console.error("Error setting driver offline on disconnect:", error);
-        }
+        // Defer marking the driver offline by the grace period (see above), and
+        // cancel any earlier pending timer first. If the socket comes back the
+        // connect handler clears this, so a transient drop never flips them off.
+        const existing = pendingDriverOffline.get(userId);
+        if (existing) clearTimeout(existing);
+        pendingDriverOffline.set(
+          userId,
+          setTimeout(async () => {
+            pendingDriverOffline.delete(userId);
+            // Reconnected in the meantime → still online, nothing to do.
+            if (connectedDrivers.has(userId)) return;
+            try {
+              const driverId = new Types.ObjectId(userId);
+              await DriverService.updateDriver(driverId, { isOnline: false });
+              await DriverVehicleService.setDriverVehiclesOnline(driverId, false);
+              // Grace expired with no reconnect → remove from customer maps.
+              io.to("customers").emit("driver_status_changed", {
+                driverId: userId,
+                isOnline: false,
+              });
+            } catch (error) {
+              console.error("Error setting driver offline on disconnect:", error);
+            }
+          }, DRIVER_OFFLINE_GRACE_MS),
+        );
       } else {
         connectedUsers.delete(userId);
       }

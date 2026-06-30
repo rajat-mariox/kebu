@@ -12,7 +12,6 @@ import 'package:kebu_driver/Screens/on_boarding_screens/onboarding_controller.da
 import 'package:kebu_driver/Services/fcm_notification_service.dart';
 import 'package:kebu_driver/Services/app_config_service.dart';
 import 'package:kebu_driver/Utils/PrefsManager/prefs_manager.dart';
-import 'package:kebu_driver/Utils/PermissionHelper/permission_helper.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -35,20 +34,19 @@ void main() async {
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
-  
-  // Initialize FCM
-  await FCMNotificationService().initialize();
-  
-  // Fetch and cache API keys from backend
-  await AppConfigService.initialize();
-  
-  // Request location and other permissions
-  await PermissionHelper.requestAllPermissions();
-  
+
   Get.put(AuthController(), permanent: true);
   Get.put(DriverBookingController(), permanent: true);
   Get.put(OnboardingController(), permanent: true);
+
+  // Paint the first frame immediately. FCM and remote config aren't needed to
+  // render the splash, and permissions are requested once from SplashScreen —
+  // so none of these should block startup.
   runApp(const MyApp());
+
+  // Fire-and-forget post-launch init (runs while the splash is on screen).
+  FCMNotificationService().initialize();
+  AppConfigService.initialize();
 }
 
 class MyApp extends StatelessWidget {

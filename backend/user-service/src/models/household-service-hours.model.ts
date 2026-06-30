@@ -7,6 +7,7 @@ export interface IHouseholdServiceHours extends Document {
   timezone: string;
   isEnabled: boolean;
   closedMessage?: string;
+  arrivalEta?: string;
   updatedBy?: Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -47,6 +48,12 @@ const householdServiceHoursSchema = new Schema<IHouseholdServiceHours>(
     closedMessage: {
       type: String,
       default: "We are currently closed. Please check back during our service hours.",
+    },
+    // Customer-facing arrival promise shown on the household home header
+    // ("arriving at your doorstep in <arrivalEta>"). Admin-editable.
+    arrivalEta: {
+      type: String,
+      default: "10 mins",
     },
     updatedBy: {
       type: Schema.Types.ObjectId,

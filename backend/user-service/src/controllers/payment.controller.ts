@@ -121,14 +121,29 @@ export const verifyPayment = async (
         });
         break;
 
-      case "SERVICE_PAYMENT":
+      case "SERVICE_PAYMENT": {
         const ServiceBooking =
           require("../models/service-booking.model").default;
-        await ServiceBooking.findByIdAndUpdate(referenceId, {
-          paymentStatus: "PAID",
-          paymentMethod: "UPI",
-        });
+        const sb = await ServiceBooking.findByIdAndUpdate(
+          referenceId,
+          { paymentStatus: "PAID", paymentMethod: "UPI" },
+          { new: true },
+        );
+        // Tell the partner's Receive Payment screen (and the customer) so it can
+        // flip to the "Payment received" success screen automatically.
+        const io = req.app.get("io");
+        if (io && sb) {
+          const payload = { bookingId: String(sb._id) };
+          if (sb.providerId) {
+            io.to(`driver_${sb.providerId}`).emit(
+              "service_payment_received",
+              payload,
+            );
+          }
+          io.to(`user_${sb.userId}`).emit("service_payment_received", payload);
+        }
         break;
+      }
     }
 
     req.rData = {

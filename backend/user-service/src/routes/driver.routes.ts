@@ -1,6 +1,7 @@
 import { Router } from "express";
 
 import * as DriverController from "../controllers/driver.controller";
+import * as DeliveryDriverController from "../controllers/delivery.driver.controller";
 import ErrorHandlerMiddleware from "../middlewares/error-handler.middleware";
 import ResponseMiddleware from "../middlewares/response.middleware";
 import DriverAuthMiddleware from "../middlewares/driver-auth.middleware";
@@ -115,6 +116,17 @@ driverRouter.put(
   "/booking/:bookingId/payment",
   DriverAuthMiddleware().verifyDriverToken,
   ErrorHandlerMiddleware(DriverController.markPaymentCollected),
+  ResponseMiddleware,
+);
+
+/**
+ * Get the authenticated driver's profile (name, phone, avatar) for the
+ * partner profile/drawer screen.
+ */
+driverRouter.get(
+  "/profile",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(DriverController.getProfile),
   ResponseMiddleware,
 );
 
@@ -412,6 +424,79 @@ driverRouter.get(
   "/route",
   DriverAuthMiddleware().verifyDriverToken,
   ErrorHandlerMiddleware(DriverController.getRoute),
+  ResponseMiddleware,
+);
+
+// ============ PARCEL DELIVERY (driver-facing) ============
+
+/**
+ * Parcel partner home/dashboard — backend-driven aggregate (partner info,
+ * available balance, and the list of incoming/available delivery requests).
+ */
+driverRouter.get(
+  "/delivery/dashboard",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(DeliveryDriverController.getDeliveryDashboard),
+  ResponseMiddleware,
+);
+
+/**
+ * Partner's parcel delivery history (grouped into date sections).
+ */
+driverRouter.get(
+  "/delivery/history",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(DeliveryDriverController.getDeliveryHistory),
+  ResponseMiddleware,
+);
+
+/**
+ * List available (SEARCHING, unassigned) parcel requests near the driver.
+ */
+driverRouter.get(
+  "/delivery/available",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(DeliveryDriverController.getAvailableDeliveries),
+  ResponseMiddleware,
+);
+
+/**
+ * Full detail of a single parcel request (backend-driven detail screen).
+ */
+driverRouter.get(
+  "/delivery/:deliveryId/detail",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(DeliveryDriverController.getDeliveryDetail),
+  ResponseMiddleware,
+);
+
+/**
+ * Accept a parcel delivery request.
+ */
+driverRouter.post(
+  "/delivery/:deliveryId/accept",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(DeliveryDriverController.acceptDelivery),
+  ResponseMiddleware,
+);
+
+/**
+ * Advance a parcel delivery's status (PICKED_UP / IN_TRANSIT / DELIVERED).
+ */
+driverRouter.put(
+  "/delivery/:deliveryId/status",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(DeliveryDriverController.updateDeliveryStatus),
+  ResponseMiddleware,
+);
+
+/**
+ * Reject/dismiss a parcel delivery request.
+ */
+driverRouter.post(
+  "/delivery/:deliveryId/reject",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(DeliveryDriverController.rejectDelivery),
   ResponseMiddleware,
 );
 

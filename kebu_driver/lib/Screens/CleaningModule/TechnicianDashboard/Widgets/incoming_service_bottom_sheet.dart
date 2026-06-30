@@ -2,9 +2,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_ringtone_player/flutter_ringtone_player.dart';
-import 'package:fluttertoast/fluttertoast.dart';
 import 'package:hexcolor/hexcolor.dart';
 import 'package:kebu_driver/AppNavigation/app_navigation.dart';
+import 'package:kebu_driver/Utils/CustomToast/custome_toast.dart';
 import 'package:kebu_driver/Screens/CleaningModule/TechnicianDashboard/Widgets/start_customer_direction.dart';
 import 'package:kebu_driver/Services/driver_api_service.dart';
 import 'package:kebu_driver/Services/socket_service.dart';
@@ -25,32 +25,39 @@ class IncomingServiceBottomSheet extends StatefulWidget {
 
 class _IncomingServiceBottomSheetState extends State<IncomingServiceBottomSheet> {
   Timer? _timer;
-  late int _remaining;
+  // ValueNotifier (not setState) so the per-second tick rebuilds only the
+  // countdown circle, not the whole sheet (scroll view + address timeline).
+  late final ValueNotifier<int> _remaining;
   bool _submitting = false;
   StreamSubscription<Map<String, dynamic>>? _takenSub;
 
   @override
   void initState() {
     super.initState();
-    _remaining = widget.countdownSeconds;
+    _remaining = ValueNotifier<int>(widget.countdownSeconds);
     _startRinging();
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
-      if (_remaining <= 1) {
+      if (_remaining.value <= 1) {
         _timer?.cancel();
         _stopRinging();
         Navigator.of(context).maybePop();
       } else {
-        setState(() => _remaining -= 1);
+        _remaining.value -= 1;
       }
     });
 
-    // Auto-dismiss if another provider grabs this booking
+    // Auto-dismiss if another provider grabs this booking. Silent — no toast:
+    // the backend broadcasts this event to everyone (including us when WE
+    // accept/cancel), so a "taken by another provider" message would wrongly
+    // pop up on our own action. We just close the now-stale sheet.
     _takenSub = SocketService().onServiceBookingTaken.listen((data) {
+      // We're accepting this job ourselves — let the accept flow handle
+      // navigation instead of dismissing here.
+      if (_submitting) return;
       final takenId = data['bookingId']?.toString();
       if (takenId == widget.booking['_id']?.toString() && mounted) {
         _stopRinging();
-        Fluttertoast.showToast(msg: "Job taken by another provider");
         Navigator.of(context).maybePop();
       }
     });
@@ -80,6 +87,7 @@ class _IncomingServiceBottomSheetState extends State<IncomingServiceBottomSheet>
     _stopRinging();
     _timer?.cancel();
     _takenSub?.cancel();
+    _remaining.dispose();
     super.dispose();
   }
 
@@ -103,7 +111,8 @@ class _IncomingServiceBottomSheetState extends State<IncomingServiceBottomSheet>
           : <String, dynamic>{'booking': widget.booking};
       pushTo(context, StartCustomerDirection(data: data));
     } else {
-      Fluttertoast.showToast(msg: res.message.isNotEmpty ? res.message : "Could not accept");
+      showCustomToast(
+          context, res.message.isNotEmpty ? res.message : "Could not accept");
     }
   }
 
@@ -191,16 +200,16 @@ class _IncomingServiceBottomSheetState extends State<IncomingServiceBottomSheet>
         alignment: Alignment.topCenter,
         children: [
           Container(
-            margin: const EdgeInsets.only(top: 50),
+            margin: const EdgeInsets.only(top: 65),
             decoration: BoxDecoration(
               color: HexColor("#FBFBFB"),
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
             ),
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
             child: SingleChildScrollView(
               child: Column(
                 children: [
-                  const SizedBox(height: 60),
+                  const SizedBox(height: 78),
 
                   // Total amount section
                   Container(
@@ -329,9 +338,9 @@ class _IncomingServiceBottomSheetState extends State<IncomingServiceBottomSheet>
                           style: ElevatedButton.styleFrom(
                             backgroundColor: HexColor("#2C54C1"),
                             shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14),
+                              borderRadius: BorderRadius.circular(12),
                             ),
-                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            padding: const EdgeInsets.symmetric(vertical: 13),
                           ),
                           onPressed: _submitting ? null : _accept,
                           child: _submitting
@@ -345,8 +354,8 @@ class _IncomingServiceBottomSheetState extends State<IncomingServiceBottomSheet>
                               : const Text(
                                   "Accept Service",
                                   style: TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w600,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w500,
                                     color: Colors.white,
                                   ),
                                 ),
@@ -358,20 +367,20 @@ class _IncomingServiceBottomSheetState extends State<IncomingServiceBottomSheet>
                           style: OutlinedButton.styleFrom(
                             side: BorderSide(color: HexColor("#2C54C1")),
                             shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14),
+                              borderRadius: BorderRadius.circular(12),
                             ),
-                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            padding: const EdgeInsets.symmetric(vertical: 13),
                           ),
                           onPressed: () {
                             _stopRinging();
                             Navigator.pop(context);
                           },
-                          child: const Text(
+                          child: Text(
                             "Ignore",
                             style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: Color(0xFF2F5AE3),
+                              fontSize: 16,
+                              fontWeight: FontWeight.w500,
+                              color: HexColor("#2C54C1"),
                             ),
                           ),
                         ),
@@ -384,20 +393,23 @@ class _IncomingServiceBottomSheetState extends State<IncomingServiceBottomSheet>
           ),
 
           Container(
-            height: 100,
-            width: 100,
+            height: 130,
+            width: 130,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              border: Border.all(color: const Color(0xFF2F5AE3), width: 3),
+              border: Border.all(color: HexColor("#2C54C1"), width: 3),
               color: Colors.white,
             ),
             alignment: Alignment.center,
-            child: Text(
-              _formatCountdown(_remaining),
-              style: const TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.w600,
-                color: Colors.black87,
+            child: ValueListenableBuilder<int>(
+              valueListenable: _remaining,
+              builder: (_, value, __) => Text(
+                _formatCountdown(value),
+                style: const TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.black,
+                ),
               ),
             ),
           ),

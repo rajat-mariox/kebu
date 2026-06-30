@@ -42,6 +42,13 @@ class GoogleMapWidget extends StatefulWidget {
   final double? focusLat;
   final double? focusLng;
 
+  /// Driver's real direction of travel (degrees, 0–360 clockwise from north),
+  /// from the GPS fix. When valid (>= 0) in [navigationMode], the camera and
+  /// the heading arrow rotate to match the road the driver is actually on, so
+  /// upcoming turns read correctly. Falls back to the straight-line bearing to
+  /// the destination when unknown (-1, e.g. stationary).
+  final double driverHeading;
+
   /// Turn-by-turn navigation camera: instead of framing driver+destination in
   /// a flat top-down box, keep a close, tilted (3D) view centred on the driver
   /// and rotated so "up" points toward the destination — the real-navigation
@@ -69,6 +76,7 @@ class GoogleMapWidget extends StatefulWidget {
     this.focusLat,
     this.focusLng,
     this.navigationMode = false,
+    this.driverHeading = -1,
   });
 
   @override
@@ -77,6 +85,13 @@ class GoogleMapWidget extends StatefulWidget {
 
 class _GoogleMapWidgetState extends State<GoogleMapWidget> {
   final Completer<GoogleMapController> _controller = Completer();
+
+  // Memoised polyline decode. Decoding the Google-encoded string into LatLng
+  // points is CPU-heavy and the source rarely changes, yet build() can run on
+  // every GPS tick (the map sits inside an Obx). Cache by source string so we
+  // only decode when the route actually changes.
+  String? _decodedPolylineSource;
+  List<LatLng> _decodedPolyline = const [];
 
   // Exact Figma map-pin icons. Null until loaded; markers fall back to default
   // coloured pins meanwhile.
@@ -88,6 +103,12 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
   static BitmapDescriptor? _dropIcon;
   static BitmapDescriptor? _driverIcon;
   static BitmapDescriptor? _navArrowIcon;
+
+  // The native Google Map surface takes a beat to initialise on Android (a
+  // grey flash before the first tiles paint). We mask that with a light
+  // placeholder until onMapCreated fires, so the screen never shows a blank
+  // map. Flips to true once and stays true.
+  bool _mapReady = false;
 
   @override
   void initState() {
@@ -137,7 +158,10 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
           widget.driverLng != oldWidget.driverLng;
       final focusChanged = widget.focusLat != oldWidget.focusLat ||
           widget.focusLng != oldWidget.focusLng;
-      if (driverChanged || focusChanged) _followDriver();
+      // Re-aim the camera when the driver turns, so "up" tracks the road even
+      // when they're moving slowly (small position deltas, big heading change).
+      final headingChanged = widget.driverHeading != oldWidget.driverHeading;
+      if (driverChanged || focusChanged || headingChanged) _followDriver();
       return;
     }
 
@@ -185,15 +209,12 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     final controller = await _controller.future;
     final dLat = widget.driverLat!;
     final dLng = widget.driverLng!;
-    final hasFocus = _isValid(widget.focusLat, widget.focusLng);
 
     final cam = CameraPosition(
       target: LatLng(dLat, dLng),
       zoom: widget.navigationMode ? 17.5 : 16.5,
       tilt: widget.navigationMode ? 60 : 0,
-      bearing: (widget.navigationMode && hasFocus)
-          ? _bearing(dLat, dLng, widget.focusLat!, widget.focusLng!)
-          : 0,
+      bearing: widget.navigationMode ? _navHeading() : 0,
     );
     // animateCamera throws "Map size can't be 0" if the surface isn't laid out
     // yet (common right after the screen opens). Retry a few times so the
@@ -242,6 +263,47 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     }
   }
 
+  /// The camera the map opens on. When both pickup and drop are already known
+  /// at first build, frame their midpoint at a zoom that fits the span so both
+  /// markers are visible from the first frame (no pan-in after load). Falls
+  /// back to centre/pickup otherwise. [_fitToTrip] later refines this precisely
+  /// once the controller is available and the surface is laid out.
+  CameraPosition _initialCamera() {
+    final pValid = _isValid(widget.pickupLat, widget.pickupLng);
+    final dValid = _isValid(widget.dropLat, widget.dropLng);
+    if (pValid && dValid) {
+      return CameraPosition(
+        target: LatLng(
+          (widget.pickupLat! + widget.dropLat!) / 2,
+          (widget.pickupLng! + widget.dropLng!) / 2,
+        ),
+        zoom: _zoomForBounds(widget.pickupLat!, widget.pickupLng!,
+            widget.dropLat!, widget.dropLng!),
+      );
+    }
+    return CameraPosition(
+      target: LatLng(
+        widget.centerLat ?? widget.pickupLat ?? 20.5937,
+        widget.centerLng ?? widget.pickupLng ?? 78.9629,
+      ),
+      zoom: widget.zoom,
+    );
+  }
+
+  /// Approximate the Google Maps zoom level that frames the lat/lng box
+  /// between two points, with a little padding so the markers aren't flush to
+  /// the edges. Precise framing is done by [_fitToTrip]; this only needs to be
+  /// close so the initial tiles load over the right region.
+  double _zoomForBounds(
+      double lat1, double lng1, double lat2, double lng2) {
+    final maxDiff = math.max((lat1 - lat2).abs(), (lng1 - lng2).abs());
+    if (maxDiff <= 0) return 15;
+    // The world spans 360° at zoom 0 and halves each level: zoom ≈ log2(360/span).
+    // Subtract ~1.2 levels of padding and clamp to sane bounds.
+    final zoom = (math.log(360 / maxDiff) / math.ln2) - 1.2;
+    return zoom.clamp(3.0, 16.0);
+  }
+
   Future<void> _animateToLocation(LatLng target, double zoom) async {
     if (_controller.isCompleted) {
       final controller = await _controller.future;
@@ -253,17 +315,16 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
 
   @override
   Widget build(BuildContext context) {
-    final center = LatLng(
-      widget.centerLat ?? widget.pickupLat ?? 20.5937,
-      widget.centerLng ?? widget.pickupLng ?? 78.9629,
-    );
-
     final markers = <Marker>{};
     final polylines = <Polyline>{};
 
     // Driving-route / tracking polyline — navigation blue (#2F6FED).
     if (widget.routePolyline != null && widget.routePolyline!.isNotEmpty) {
-      final points = decodePolyline(widget.routePolyline!);
+      if (widget.routePolyline != _decodedPolylineSource) {
+        _decodedPolylineSource = widget.routePolyline;
+        _decodedPolyline = decodePolyline(widget.routePolyline!);
+      }
+      final points = _decodedPolyline;
       if (points.length >= 2) {
         polylines.add(Polyline(
           polylineId: const PolylineId('route'),
@@ -305,13 +366,14 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     // turn look. Otherwise it's the blue concentric "current location" pin.
     if (widget.driverLat != null && widget.driverLng != null &&
         widget.driverLat != 0 && widget.driverLng != 0) {
+      // Show the heading arrow during navigation whenever we can derive a
+      // direction — the driver's real GPS heading, or (stationary) the bearing
+      // toward the destination via [_navHeading].
       final useNavArrow = widget.navigationMode &&
           _navArrowIcon != null &&
-          _isValid(widget.focusLat, widget.focusLng);
-      final heading = useNavArrow
-          ? _bearing(widget.driverLat!, widget.driverLng!,
-              widget.focusLat!, widget.focusLng!)
-          : 0.0;
+          (widget.driverHeading >= 0 ||
+              _isValid(widget.focusLat, widget.focusLng));
+      final heading = useNavArrow ? _navHeading() : 0.0;
       markers.add(Marker(
         markerId: const MarkerId('driver'),
         position: LatLng(widget.driverLat!, widget.driverLng!),
@@ -344,10 +406,10 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
           // Default Google style (same as the customer "Book a Ride" map).
           mapType: MapType.normal,
           padding: EdgeInsets.only(bottom: widget.bottomPadding),
-          initialCameraPosition: CameraPosition(
-            target: center,
-            zoom: widget.zoom,
-          ),
+          // Frame pickup→drop from the very first frame when both are known,
+          // so the trip (and both markers) is in view immediately instead of
+          // opening on the pickup and panning out after the map loads.
+          initialCameraPosition: _initialCamera(),
           markers: markers,
           polylines: polylines,
           // Map gestures only when interactive; otherwise the map must not
@@ -365,6 +427,9 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
             }
             widget.onMapCreated?.call(controller);
 
+            // Surface is up — drop the loading placeholder.
+            if (mounted && !_mapReady) setState(() => _mapReady = true);
+
             await Future.delayed(const Duration(milliseconds: 200));
             // Live-tracking mode follows the driver; otherwise auto-fit
             // pickup→drop when both are already known at creation time.
@@ -377,6 +442,26 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
             }
           },
         ),
+        // Loading placeholder over the map until the native surface is ready,
+        // so the user never sees the raw grey platform-view flash.
+        if (!_mapReady)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: Container(
+                color: const Color(0xFFEAEFF5),
+                alignment: Alignment.center,
+                child: const SizedBox(
+                  width: 28,
+                  height: 28,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.5,
+                    valueColor:
+                        AlwaysStoppedAnimation<Color>(Color(0xFF2C54C1)),
+                  ),
+                ),
+              ),
+            ),
+          ),
         Positioned(
           right: 10,
           bottom: 10,
@@ -424,6 +509,21 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
         child: Icon(icon, size: 20, color: Colors.black87),
       ),
     );
+  }
+
+  /// The bearing the navigation camera (and heading arrow) should point at.
+  /// Prefers the driver's real GPS direction of travel so the road ahead is
+  /// "up" and turns read correctly; falls back to the straight-line bearing to
+  /// the destination when the device heading is unknown (stationary), and to
+  /// north (0) when there's no destination either.
+  double _navHeading() {
+    if (widget.driverHeading >= 0) return widget.driverHeading;
+    if (_isValid(widget.driverLat, widget.driverLng) &&
+        _isValid(widget.focusLat, widget.focusLng)) {
+      return _bearing(widget.driverLat!, widget.driverLng!,
+          widget.focusLat!, widget.focusLng!);
+    }
+    return 0;
   }
 
   /// Initial bearing (degrees, 0–360) from one lat/lng to another, used to

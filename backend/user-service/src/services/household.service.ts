@@ -57,6 +57,7 @@ export const updateServiceHours = async (
     timezone: string;
     isEnabled: boolean;
     closedMessage: string;
+    arrivalEta: string;
   }>,
   adminId?: Types.ObjectId,
 ) => {
@@ -289,18 +290,27 @@ export const getProviderServiceBookings = async (
 };
 
 export const getActiveUserServiceBooking = async (userId: Types.ObjectId) => {
+  // A PENDING request that no provider accepted within 15 minutes is treated as
+  // abandoned, so a stuck request never permanently blocks the user from
+  // booking again. Assigned/in-progress bookings always count as active.
+  const STALE_PENDING_MS = 15 * 60 * 1000;
+  const staleCutoff = new Date(Date.now() - STALE_PENDING_MS);
   return await ServiceBooking.findOne({
     userId,
-    status: {
-      $in: [
-        "PENDING",
-        "ACCEPTED",
-        "PROVIDER_ASSIGNED",
-        "PROVIDER_EN_ROUTE",
-        "PROVIDER_ARRIVED",
-        "IN_PROGRESS",
-      ],
-    },
+    $or: [
+      {
+        status: {
+          $in: [
+            "ACCEPTED",
+            "PROVIDER_ASSIGNED",
+            "PROVIDER_EN_ROUTE",
+            "PROVIDER_ARRIVED",
+            "IN_PROGRESS",
+          ],
+        },
+      },
+      { status: "PENDING", createdAt: { $gte: staleCutoff } },
+    ],
   })
     .populate("providerId", "fullName mobileNumber profileImage rating")
     .populate("categoryId", "name icon")

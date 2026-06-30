@@ -7,6 +7,7 @@ import 'package:kebu_customer/AppNavigation/app_navigation.dart';
 import 'package:kebu_customer/Screens/BookARideModule/PaymentScreen/payment_screen.dart';
 import 'package:kebu_customer/Screens/CleaningModule/Controller/household_booking_controller.dart';
 import 'package:kebu_customer/Screens/CleaningModule/CleaningOrderPlaced/cleaning_order_placed.dart';
+import 'package:kebu_customer/Screens/CleaningModule/ServiceWaitingScreen/service_waiting_screen.dart';
 import 'package:kebu_customer/Services/household_api_service.dart';
 import 'package:kebu_customer/Services/customer_features_api_service.dart';
 import 'package:kebu_customer/Services/wallet_api_service.dart';
@@ -984,10 +985,13 @@ class _CleaningReviewBookingScreenState
     final bookingId = (booking is Map ? booking['_id'] : null)?.toString();
     final isCash = controller.paymentMethod.value.toLowerCase() == 'cash';
 
-    // Cash → no gateway, straight to confirmation. Online → choose a payment
-    // method (Razorpay), branded for the household/cleaning module.
-    if (isCash || bookingId == null || bookingId.isEmpty) {
+    // Cash → wait (up to a minute) for a partner to accept, then confirm; if
+    // none accepts it auto-cancels. Online → pay first (Razorpay). With no
+    // booking id we can't track, so fall back to the plain confirmation.
+    if (bookingId == null || bookingId.isEmpty) {
       pushTo(context, const CleaningOrderPlaced());
+    } else if (isCash) {
+      pushTo(context, ServiceWaitingScreen(bookingId: bookingId));
     } else {
       pushTo(
         context,

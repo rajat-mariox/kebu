@@ -5,11 +5,14 @@ import 'package:hexcolor/hexcolor.dart';
 import 'package:intl/intl.dart';
 import 'package:kebu_customer/AppNavigation/app_navigation.dart';
 import 'package:kebu_customer/CommonWidgets/app_bar.dart';
+import 'package:kebu_customer/CommonWidgets/map_warmup.dart';
 import 'package:kebu_customer/Screens/BookARideModule/BookARide/book_a_ride_screen.dart';
 import 'package:kebu_customer/Screens/BookARideModule/BookingDetail/booking_detail_screen.dart';
 import 'package:kebu_customer/Screens/BookARideModule/Controller/booking_controller.dart';
 import 'package:kebu_customer/Screens/BookARideModule/LiveTracking/live_tracking_screen.dart';
 import 'package:kebu_customer/Screens/CleaningModule/PreBookingForCleaning/pre_booking_for_cleaning.dart';
+import 'package:kebu_customer/Screens/CleaningModule/HouseholdLiveTracking/household_live_tracking_screen.dart';
+import 'package:kebu_customer/Services/household_api_service.dart';
 import 'package:kebu_customer/Screens/Screens/ManagePlanScreen/manage_plan_screen.dart';
 import 'package:kebu_customer/Screens/Screens/WalletScreen/wallet_screen.dart';
 import 'package:kebu_customer/Screens/SendParcelModule/SendParcelScreen/send_parcel_screen.dart';
@@ -44,6 +47,25 @@ class _HomeScreenState extends State<HomeScreen> {
   List<dynamic> justForYouOffers = [];
   bool isLoading = true;
 
+  // Active household/service booking (so the customer can resume tracking after
+  // the app is killed). Null when there's nothing in progress.
+  Map<String, dynamic>? _activeService;
+  static const _serviceActiveStatuses = {
+    'ACCEPTED',
+    'PROVIDER_ASSIGNED',
+    'PROVIDER_EN_ROUTE',
+    'PROVIDER_ARRIVED',
+    'IN_PROGRESS',
+  };
+  // Ride statuses that should surface the resume mini-tracker.
+  static const _rideActiveStatuses = {
+    'SEARCHING',
+    'ASSIGNED',
+    'DRIVER_ARRIVED',
+    'PICKED',
+    'IN_PROGRESS',
+  };
+
   String _selectedChip = 'Trending';
   int _bookingPage = 0;
   final PageController _bookingPageController =
@@ -55,12 +77,19 @@ class _HomeScreenState extends State<HomeScreen> {
     _loadData();
     SocketService().connect();
     _checkActiveBooking();
+    _checkActiveServiceBooking();
 
     final bookingController = Get.find<BookingController>();
     if (bookingController.pickupLat.value == 0 &&
         !bookingController.currentLocationLoaded.value) {
       bookingController.detectCurrentLocation();
     }
+
+    // Pre-warm the native Google Maps SDK while the user is on the home screen
+    // so "Book a cab" and live-tracking maps render instantly when opened.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) MapWarmup.ensure(context);
+    });
   }
 
   @override
@@ -79,10 +108,228 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _checkActiveBooking() async {
     final bc = Get.find<BookingController>();
-    final hasActive = await bc.checkActiveBooking();
-    if (hasActive && mounted) {
-      pushTo(context, const LiveTrackingScreen());
+    await bc.checkActiveBooking();
+    // No auto-open — the floating ride mini-tracker (reactive on the
+    // controller's bookingStatus) lets the user resume tracking on tap.
+    if (mounted) setState(() {});
+  }
+
+  /// Resume support: if the user has an accepted/in-progress service booking,
+  /// surface a banner so they can reopen live tracking after an app restart.
+  Future<void> _checkActiveServiceBooking() async {
+    final res = await HouseholdApiService.getActiveBooking();
+    if (!mounted) return;
+    Map<String, dynamic>? active;
+    if (res.success && res.data != null && res.data['booking'] is Map) {
+      final b = Map<String, dynamic>.from(res.data['booking']);
+      final status = (b['status'] ?? '').toString();
+      if (_serviceActiveStatuses.contains(status)) active = b;
     }
+    if (active != _activeService) setState(() => _activeService = active);
+  }
+
+  void _openServiceTracking(Map<String, dynamic> b) {
+    final bookingId = (b['_id'] ?? '').toString();
+    if (bookingId.isEmpty) return;
+    final provider = (b['providerId'] is Map)
+        ? Map<String, dynamic>.from(b['providerId'])
+        : <String, dynamic>{};
+    final address = (b['address'] is Map)
+        ? Map<String, dynamic>.from(b['address'])
+        : <String, dynamic>{};
+    pushTo(
+      context,
+      HouseholdLiveTrackingScreen(
+        bookingId: bookingId,
+        provider: provider,
+        destinationLat: (address['lat'] as num?)?.toDouble() ?? 0,
+        destinationLng: (address['lng'] as num?)?.toDouble() ?? 0,
+        destinationAddress: (address['fullAddress'] ?? '').toString(),
+        otp: (b['otp'] ?? '').toString(),
+      ),
+    );
+  }
+
+  String _serviceStatusLabel(String s) {
+    switch (s) {
+      case 'PROVIDER_EN_ROUTE':
+        return 'Partner on the way';
+      case 'PROVIDER_ARRIVED':
+        return 'Partner arrived';
+      case 'IN_PROGRESS':
+        return 'Service in progress';
+      default:
+        return 'Partner assigned';
+    }
+  }
+
+  String _rideStatusLabel(String s) {
+    switch (s) {
+      case 'SEARCHING':
+        return 'Finding your driver';
+      case 'DRIVER_ARRIVED':
+        return 'Driver arrived';
+      case 'PICKED':
+      case 'IN_PROGRESS':
+        return 'Trip in progress';
+      default:
+        return 'Driver assigned';
+    }
+  }
+
+  /// Floating resume mini-tracker for an active cab ride (same white style as
+  /// the household one). Tapping reopens live tracking.
+  Widget _rideMiniTracker(String status) {
+    final driver = Get.find<BookingController>().driverInfo;
+    final name = (driver['fullName'] ?? 'Your driver').toString();
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: () => pushTo(context, const LiveTrackingScreen()),
+        child: Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: Colors.black.withOpacity(0.06)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.12),
+                blurRadius: 16,
+                offset: const Offset(0, 6),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: HexColor('#F4F4F6'),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(Icons.local_taxi_rounded,
+                    color: HexColor('#1B1D21'), size: 22),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _rideStatusLabel(status),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.poppins(
+                        color: HexColor('#1B1D21'),
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '$name • Tap to track',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.poppins(
+                        color: Colors.black54,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 6),
+              const Icon(Icons.chevron_right, color: Colors.black54, size: 22),
+              const SizedBox(width: 2),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Compact floating "mini screen" pinned above the bottom nav so an active
+  /// service is always reachable after an app restart — tap to expand into full
+  /// live tracking.
+  Widget _miniTracker() {
+    final b = _activeService!;
+    final status = (b['status'] ?? '').toString();
+    final provider = (b['providerId'] is Map)
+        ? Map<String, dynamic>.from(b['providerId'])
+        : <String, dynamic>{};
+    final name = (provider['fullName'] ?? 'Your partner').toString();
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: () => _openServiceTracking(b),
+        child: Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: Colors.black.withOpacity(0.06)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.12),
+                blurRadius: 16,
+                offset: const Offset(0, 6),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: HexColor('#F4F4F6'),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(Icons.near_me_rounded,
+                    color: HexColor('#1B1D21'), size: 22),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _serviceStatusLabel(status),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.poppins(
+                        color: HexColor('#1B1D21'),
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '$name • Tap to track',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.poppins(
+                        color: Colors.black54,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 6),
+              const Icon(Icons.chevron_right, color: Colors.black54, size: 22),
+              const SizedBox(width: 2),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _loadData() async {
@@ -165,9 +412,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
     return Scaffold(
       backgroundColor: Colors.white,
-      body: SingleChildScrollView(
-        child: Stack(
-          children: [
+      body: Stack(
+        children: [
+          SingleChildScrollView(
+            child: Stack(
+              children: [
             // ==================== HEADER (gradient) ====================
             commonAppBar(
               height: 200,
@@ -340,6 +589,30 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ],
         ),
+          ),
+          Positioned(
+            left: 16,
+            right: 16,
+            bottom: 14,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Obx(() {
+                  final s = bookingController.bookingStatus.value;
+                  if (!_rideActiveStatuses.contains(s)) {
+                    return const SizedBox.shrink();
+                  }
+                  return Padding(
+                    padding: EdgeInsets.only(
+                        bottom: _activeService != null ? 10 : 0),
+                    child: _rideMiniTracker(s),
+                  );
+                }),
+                if (_activeService != null) _miniTracker(),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

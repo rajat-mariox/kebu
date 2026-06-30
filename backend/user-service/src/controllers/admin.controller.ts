@@ -1593,20 +1593,55 @@ export const getServiceBookings = async (
     if (endDate) query.createdAt.$lte = new Date(endDate);
   }
 
-  const bookings = await ServiceBooking.find(query)
+  // NOTE: the ServiceBooking schema has `serviceType` (string) — not a
+  // `serviceId` ref — and `providerId` actually stores a Driver id. Populating
+  // a non-existent `serviceId` path threw a StrictPopulateError, which is why
+  // the admin list came back empty.
+  const docs = await ServiceBooking.find(query)
     .populate("userId", "fullName mobileNumber email")
-    .populate("providerId", "businessName mobileNumber")
-    .populate("serviceId", "name")
+    .populate({
+      path: "providerId",
+      model: "Driver",
+      select: "fullName mobileNumber",
+    })
     .populate("categoryId", "name")
     .select("-__v")
     .sort({ createdAt: -1 })
     .skip(page * limit)
-    .limit(limit);
+    .limit(limit)
+    .lean();
+
+  // Shape each booking to the field names the admin Bookings table reads.
+  const items = (docs as any[]).map((b) => {
+    const provider = b.providerId;
+    // actualCost (base + extra) is the real charged total once completed.
+    const total = b.actualCost ?? b.finalCost ?? b.estimatedCost ?? 0;
+    return {
+      ...b,
+      serviceId: { name: b.serviceType || "" },
+      providerId: provider
+        ? {
+            _id: provider._id,
+            name: provider.fullName || "",
+            phone: provider.mobileNumber || "",
+          }
+        : null,
+      address: {
+        ...(b.address || {}),
+        address: b.address?.fullAddress || "",
+      },
+      scheduledDate: b.preferredDate,
+      scheduledTime: b.preferredTimeSlot || "",
+      totalAmount: total,
+      finalAmount: total,
+      extraAmount: b.extraAmount ?? 0,
+    };
+  });
 
   const total = await ServiceBooking.countDocuments(query);
 
   req.rData = {
-    items: bookings,
+    items,
     total,
     page,
     limit,
@@ -1628,8 +1663,11 @@ export const getServiceBookingDetails = async (
 
   const booking = await ServiceBooking.findById(bookingId)
     .populate("userId", "fullName mobileNumber email")
-    .populate("providerId", "businessName mobileNumber email rating")
-    .populate("serviceId")
+    .populate({
+      path: "providerId",
+      model: "Driver",
+      select: "fullName mobileNumber rating",
+    })
     .populate("categoryId", "name")
     .select("-__v");
 
@@ -1707,6 +1745,16 @@ export const getServices = async (
   next();
 };
 
+// "Everyday Cleaning" -> "everyday-cleaning". The (categoryId, slug) pair is
+// unique, so the admin can't create two services with the same name in a
+// category — the duplicate insert simply fails and surfaces as an error.
+const slugifyServiceName = (value: string): string =>
+  (value || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
 export const createService = async (
   req: Request,
   res: Response,
@@ -1718,24 +1766,23 @@ export const createService = async (
     categoryId,
     name,
     description,
-    shortDescription,
     icon,
     image,
     basePrice,
-    unit,
     duration,
     displayOrder,
   } = req.body;
 
+  // The model stores the label as `serviceType` (with a required `slug`); the
+  // admin panel sends it as `name`, so map it across here.
   const service = await ServiceDetails.create({
     categoryId,
-    name,
+    serviceType: name,
+    slug: slugifyServiceName(name),
     description,
-    shortDescription,
     icon,
     image,
     basePrice: basePrice || 0,
-    unit: unit || "per_service",
     duration: duration || 60,
     displayOrder: displayOrder || 0,
     isActive: true,
@@ -1754,7 +1801,14 @@ export const updateService = async (
   console.log("AdminController => updateService");
 
   const { serviceId } = req.params;
-  const updateData = req.body;
+  // Strip admin-only aliases and re-map `name` onto the stored `serviceType`
+  // (regenerating the slug) so an edited name actually persists.
+  const { name, shortDescription, unit, price, ...rest } = req.body;
+  const updateData: any = { ...rest };
+  if (name !== undefined) {
+    updateData.serviceType = name;
+    updateData.slug = slugifyServiceName(name);
+  }
 
   const service = await ServiceDetails.findByIdAndUpdate(
     serviceId,

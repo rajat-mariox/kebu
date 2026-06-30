@@ -32,16 +32,20 @@ const HouseholdValidator = () => {
     res: Response,
     next: NextFunction,
   ) => {
+    // The app sends a flat address ({ address|fullAddress, lat, lng }); city /
+    // pincode aren't always resolvable from a GPS pin, so only the coordinates
+    // + a readable address are required. The controller normalises the rest.
     const v = new Validator(req.body, {
       categoryId: "required|string",
       serviceType: "required|string",
       preferredDate: "required|dateFormat:YYYY-MM-DD",
       preferredTimeSlot: "required|string",
-      "address.fullAddress": "required|string",
       "address.lat": "required|numeric",
       "address.lng": "required|numeric",
-      "address.city": "required|string",
-      "address.pincode": "required|string",
+      "address.fullAddress": "string",
+      "address.address": "string",
+      "address.city": "string",
+      "address.pincode": "string",
       paymentMethod: "in:CASH,WALLET,CARD,UPI",
     });
 

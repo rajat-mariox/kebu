@@ -437,6 +437,14 @@ class _HouseholdWorkDetailsScreenState
         color: Colors.white,
         border: Border.all(color: _border),
         borderRadius: BorderRadius.circular(12),
+        // Figma: drop-shadow 0px 2px 1px rgba(0,0,0,0.03)
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x08000000),
+            offset: Offset(0, 2),
+            blurRadius: 1,
+          ),
+        ],
       );
 
   Widget _textInput(Map<String, dynamic> f) {
@@ -459,7 +467,7 @@ class _HouseholdWorkDetailsScreenState
         ),
         decoration: InputDecoration(
           isDense: true,
-          contentPadding: const EdgeInsets.symmetric(vertical: 12),
+          contentPadding: const EdgeInsets.symmetric(vertical: 10),
           hintText: placeholder,
           hintStyle: TextStyle(color: _hintColor, fontSize: 15),
           border: InputBorder.none,
@@ -490,7 +498,7 @@ class _HouseholdWorkDetailsScreenState
       onTap: () => _openDropdownSheet(f),
       child: Container(
         decoration: _boxDecoration,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         child: Row(
           children: [
             Expanded(

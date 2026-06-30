@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:hexcolor/hexcolor.dart';
@@ -19,11 +20,19 @@ class LoadingPointScreen extends StatefulWidget {
 }
 
 class _LoadingPointScreenState extends State<LoadingPointScreen> {
+  static final Color _brandRed = HexColor("#E53935");
 
   String selectedAddress = 'Detecting location...';
   double selectedLat = 0;
   double selectedLng = 0;
+  bool _detecting = false;
   List<dynamic> savedAddresses = [];
+
+  // Manual address search (Google Places).
+  final TextEditingController _searchCtrl = TextEditingController();
+  List<Map<String, dynamic>> _results = [];
+  bool _isSearching = false;
+  Timer? _debounce;
 
   @override
   void initState() {
@@ -32,7 +41,15 @@ class _LoadingPointScreenState extends State<LoadingPointScreen> {
     _loadAddresses();
   }
 
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
   Future<void> _detectCurrentLocation() async {
+    setState(() => _detecting = true);
     try {
       LocationPermission permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
@@ -56,14 +73,22 @@ class _LoadingPointScreenState extends State<LoadingPointScreen> {
         lng: pos.longitude,
       );
 
-      if (res.success && res.data != null && mounted) {
+      if (mounted) {
         setState(() {
           selectedLat = pos.latitude;
           selectedLng = pos.longitude;
-          selectedAddress = res.data['address'] ?? res.data['display_name'] ?? '${pos.latitude}, ${pos.longitude}';
+          selectedAddress = (res.success && res.data != null)
+              ? (res.data['address'] ??
+                  res.data['display_name'] ??
+                  '${pos.latitude}, ${pos.longitude}')
+              : '${pos.latitude}, ${pos.longitude}';
+          _searchCtrl.text = selectedAddress;
         });
       }
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _detecting = false);
+    }
   }
 
   Future<void> _loadAddresses() async {
@@ -71,280 +96,321 @@ class _LoadingPointScreenState extends State<LoadingPointScreen> {
     if (response.success && response.data != null && mounted) {
       setState(() {
         savedAddresses = response.data['addresses'] ?? [];
-        if (savedAddresses.isNotEmpty) {
-          selectedAddress = savedAddresses.first['address'] ?? selectedAddress;
-        }
       });
     }
   }
 
-  Future<void> _reverseGeocode(double lat, double lng) async {
-    final response = await MapsApiService.reverseGeocode(lat: lat, lng: lng);
-    if (response.success && response.data != null && mounted) {
+  void _onSearchChanged(String query) {
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 400), () => _search(query));
+  }
+
+  Future<void> _search(String query) async {
+    if (query.trim().length < 3) {
+      setState(() => _results = []);
+      return;
+    }
+    setState(() => _isSearching = true);
+    final res = await MapsApiService.searchPlaces(
+      query,
+      lat: selectedLat != 0 ? selectedLat : null,
+      lng: selectedLng != 0 ? selectedLng : null,
+    );
+    if (!mounted) return;
+    setState(() {
+      _isSearching = false;
+      if (res.success && res.data != null) {
+        final preds = res.data['predictions'] as List? ?? [];
+        _results =
+            preds.map((p) => Map<String, dynamic>.from(p as Map)).toList();
+      } else {
+        _results = [];
+      }
+    });
+  }
+
+  Future<void> _selectPrediction(Map<String, dynamic> prediction) async {
+    final placeId = (prediction['placeId'] ?? '').toString();
+    if (placeId.isEmpty) return;
+    FocusScope.of(context).unfocus();
+    final res = await MapsApiService.getPlaceDetails(placeId);
+    if (!mounted) return;
+    if (res.success && res.data != null) {
+      final place = res.data['place'] ?? res.data;
+      final lat = (place['lat'] ?? 0).toDouble();
+      final lng = (place['lng'] ?? 0).toDouble();
+      final address =
+          (place['address'] ?? prediction['description'] ?? '').toString();
       setState(() {
-        selectedAddress = response.data['address'] ?? selectedAddress;
+        selectedLat = lat;
+        selectedLng = lng;
+        selectedAddress = address;
+        _searchCtrl.text = address;
+        _results = [];
       });
     }
   }
+
+  void _selectSaved(dynamic addr) {
+    final lat = (addr['lat'] ?? addr['latitude'] ?? 0).toDouble();
+    final lng = (addr['lng'] ?? addr['longitude'] ?? 0).toDouble();
+    final address = (addr['address'] ?? '').toString();
+    setState(() {
+      if (lat != 0) selectedLat = lat;
+      if (lng != 0) selectedLng = lng;
+      selectedAddress = address;
+      _searchCtrl.text = address;
+      _results = [];
+    });
+  }
+
+  bool get _canConfirm => selectedLat != 0 && selectedLng != 0;
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
-      body: SingleChildScrollView(
-        child: Stack(
-          children: [
-
-            sendParcelAppBar(
-                height : 160,
-                context : context,
-                child: Container(
-                  padding: const EdgeInsets.only(top: 60, left: 15, right: 15),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      InkWell(
-                        onTap: (){
-                          Navigator.pop(context);
-                        },
-                        child: Row(
-                          children: [
-                            Container(
-                              margin: const EdgeInsets.only(left: 5),
-                              child: const Icon(Icons.arrow_back_ios, size: 20,color: Colors.white,),
-                            ),
-
-                            const SizedBox(width: 10,),
-                          ],
-                        ),
-                      ),
-
-                      const Spacer(),
-
-                      Text(widget.title, style: const TextStyle(color: Colors.white, fontSize: 16),),
-
-                      const Spacer(),
-
-                      const NotificationIconButton(),
-                    ],
+      body: Column(
+        children: [
+          sendParcelAppBar(
+            height: 120,
+            context: context,
+            child: Container(
+              padding: const EdgeInsets.only(top: 55, left: 15, right: 15),
+              child: Row(
+                children: [
+                  InkWell(
+                    onTap: () => Navigator.pop(context),
+                    child: const Icon(Icons.arrow_back_ios,
+                        size: 20, color: Colors.white),
                   ),
-                )
-            ),
-
-            Container(
-              margin: const EdgeInsets.only(top: 120),
-              height: 300,
-              decoration: const BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.only(topLeft: Radius.circular(32), topRight: Radius.circular(32))
-              ),
-              child: ClipRRect(
-                borderRadius: const BorderRadius.only(topLeft: Radius.circular(32), topRight: Radius.circular(32)),
-                child: Stack(
-                  children: [
-                    selectedLat != 0
-                        ? GoogleMapWidget(
-                            pickupLat: selectedLat,
-                            pickupLng: selectedLng,
-                            centerLat: selectedLat,
-                            centerLng: selectedLng,
-                            zoom: 15,
-                          )
-                        : Image.asset("assets/map_view.png"),
-                    Positioned(
-                      left: 10,
-                      bottom: 10,
-                      child: GestureDetector(
-                        onTap: _detectCurrentLocation,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: HexColor("#FF3B59"),
-                            borderRadius: BorderRadius.circular(20),
-                            boxShadow: [
-                              BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 4),
-                            ],
-                          ),
-                          child: const Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.my_location, size: 14, color: Colors.white),
-                              SizedBox(width: 4),
-                              Text("My Location", style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: Colors.white)),
-                            ],
-                          ),
-                        ),
-                      ),
+                  Expanded(
+                    child: Text(
+                      widget.title,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white, fontSize: 16),
                     ),
-                  ],
+                  ),
+                  const NotificationIconButton(),
+                ],
+              ),
+            ),
+          ),
+
+          // ── Manual search box ──
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+            child: TextField(
+              controller: _searchCtrl,
+              onChanged: _onSearchChanged,
+              style: GoogleFonts.poppins(fontSize: 14),
+              decoration: InputDecoration(
+                hintText: "Search ${widget.title.toLowerCase()} address",
+                hintStyle:
+                    GoogleFonts.poppins(fontSize: 13, color: Colors.grey),
+                prefixIcon: const Icon(Icons.search, size: 20),
+                suffixIcon: _searchCtrl.text.isNotEmpty
+                    ? IconButton(
+                        icon: const Icon(Icons.clear, size: 18),
+                        onPressed: () {
+                          _searchCtrl.clear();
+                          setState(() => _results = []);
+                        },
+                      )
+                    : null,
+                contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 12, vertical: 12),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Colors.grey.shade300),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Colors.grey.shade300),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: _brandRed),
                 ),
               ),
             ),
+          ),
 
-            Positioned(
-              bottom: 0,
-                left: 0,
-                right: 0,
-                child: Container(
-                  height: 320,
-                  margin: const EdgeInsets.only(top: 120),
-                  decoration: const BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.only(topLeft: Radius.circular(32), topRight: Radius.circular(32))
-                  ),
-                  child: Column(
-                    children: [
-
-                      const SizedBox(height: 30,),
-
-                      Row(
-                        children: [
-
-                          const SizedBox(width: 30,),
-                          Image.asset("assets/star_with_location.png", height: 30,),
-
-                          const SizedBox(width: 15,),
-
-                          Expanded(child: Text(selectedAddress, style: const TextStyle(color: Colors.black, fontSize: 13), overflow: TextOverflow.ellipsis,)),
-
-                          const Spacer(),
-
-                          const Icon(Icons.close, size: 19,),
-
-                          const SizedBox(width: 30,),
+          // ── Map ──
+          Container(
+            height: 180,
+            margin: const EdgeInsets.symmetric(horizontal: 16),
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(borderRadius: BorderRadius.circular(20)),
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: selectedLat != 0
+                      ? GoogleMapWidget(
+                          pickupLat: selectedLat,
+                          pickupLng: selectedLng,
+                          centerLat: selectedLat,
+                          centerLng: selectedLng,
+                          zoom: 15,
+                        )
+                      : Image.asset("assets/map_view.png", fit: BoxFit.cover),
+                ),
+                Positioned(
+                  left: 10,
+                  bottom: 10,
+                  child: GestureDetector(
+                    onTap: _detecting ? null : _detectCurrentLocation,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: HexColor("#FF3B59"),
+                        borderRadius: BorderRadius.circular(20),
+                        boxShadow: [
+                          BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.15),
+                              blurRadius: 4),
                         ],
                       ),
-
-                      const SizedBox(height: 20,),
-
-                      Container(
-                        height: 1,
-                        margin: const EdgeInsets.only(left: 30, right: 30),
-                        width: MediaQuery.of(context).size.width,
-                        padding: const EdgeInsets.only(top: 8, bottom: 8),
-                        color: Colors.grey.withOpacity(0.3),
-                      ),
-
-                      const SizedBox(height: 30,),
-
-                      Row(
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
                         children: [
-
-                          const Spacer(),
-
-                          Column(
-                            children: [
-                              Container(
-                                height : 60,
-                                decoration: BoxDecoration(
-                                  color: HexColor("#EFEFEF"),
-                                  borderRadius: BorderRadius.circular(100)
-                                ),
-                                padding: const EdgeInsets.all(14),
-                                child: Image.asset('assets/home.png', height: 60,),
-                              ),
-
-                              const SizedBox(height: 10,),
-
-                              const Text("Home", style: TextStyle(color: Colors.black, fontSize: 13, fontWeight: FontWeight.w500),)
-                            ],
-                          ),
-
-                          const SizedBox(width: 30,),
-
-                          Column(
-                            children: [
-                              Container(
-                                height : 60,
-                                decoration: BoxDecoration(
-                                    color: HexColor("#EFEFEF"),
-                                    borderRadius: BorderRadius.circular(100)
-                                ),
-                                padding: const EdgeInsets.all(16),
-                                child: Image.asset('assets/work.png', height: 60,),
-                              ),
-
-                              const SizedBox(height: 10,),
-
-                              const Text("Work", style: TextStyle(color: Colors.black, fontSize: 13, fontWeight: FontWeight.w500),)
-                            ],
-                          ),
-
-
-                          const SizedBox(width: 30,),
-
-                          Column(
-                            children: [
-                              Container(
-                                height : 60,
-                                decoration: BoxDecoration(
-                                    color: HexColor("#EFEFEF"),
-                                    borderRadius: BorderRadius.circular(100)
-                                ),
-                                padding: const EdgeInsets.all(14),
-                                child: Image.asset('assets/location_add.png', height: 60,),
-                              ),
-
-                              const SizedBox(height: 10,),
-
-                              const Text("Add New", style: TextStyle(color: Colors.black, fontSize: 13, fontWeight: FontWeight.w500),)
-                            ],
-                          ),
-
-                          const Spacer()
+                          _detecting
+                              ? const SizedBox(
+                                  width: 14,
+                                  height: 14,
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 2, color: Colors.white),
+                                )
+                              : const Icon(Icons.my_location,
+                                  size: 14, color: Colors.white),
+                          const SizedBox(width: 4),
+                          const Text("Use live location",
+                              style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w500,
+                                  color: Colors.white)),
                         ],
                       ),
-
-                      const SizedBox(height: 20,),
-
-                      // Proceed Button
-                      Container(
-                        width: double.infinity,
-                        height: 55,
-                        margin: const EdgeInsets.only(left: 30, right: 30),
-                        child: ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFFE53935),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                          ),
-                          onPressed: () {
-                            Navigator.pop(context, {
-                              'lat': selectedLat,
-                              'lng': selectedLng,
-                              'address': selectedAddress,
-                            });
-                          },
-                          child: Text(
-                            'Confirm',
-                            style: GoogleFonts.poppins(
-                              fontWeight: FontWeight.w600,
-                              color: Colors.white,
-                              fontSize: 16,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-
-                    ],
+                    ),
                   ),
-                )
-            )
-          ],
-        ),
+                ),
+              ],
+            ),
+          ),
+
+          // ── Results / selected address / saved addresses ──
+          Expanded(child: _middle()),
+
+          // ── Confirm ──
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+            child: SizedBox(
+              width: double.infinity,
+              height: 55,
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor:
+                      _canConfirm ? _brandRed : Colors.grey.shade300,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                onPressed: _canConfirm
+                    ? () {
+                        Navigator.pop(context, {
+                          'lat': selectedLat,
+                          'lng': selectedLng,
+                          'address': selectedAddress,
+                        });
+                      }
+                    : null,
+                child: Text(
+                  'Confirm',
+                  style: GoogleFonts.poppins(
+                    fontWeight: FontWeight.w600,
+                    color: Colors.white,
+                    fontSize: 16,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
 
-  Widget sectionTitle(String text) {
-    return Text(
-      text,
-      style: const TextStyle(
-        fontWeight: FontWeight.bold,
-        fontSize: 16,
-      ),
+  Widget _middle() {
+    if (_isSearching) {
+      return Center(child: CircularProgressIndicator(color: _brandRed));
+    }
+    // Search results take priority.
+    if (_results.isNotEmpty) {
+      return ListView.separated(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        itemCount: _results.length,
+        separatorBuilder: (_, __) =>
+            Divider(height: 1, color: Colors.grey.shade200),
+        itemBuilder: (_, i) {
+          final p = _results[i];
+          return ListTile(
+            leading: Icon(Icons.location_on, color: _brandRed, size: 22),
+            title: Text(
+              (p['mainText'] ?? p['description'] ?? '').toString(),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style:
+                  GoogleFonts.poppins(fontSize: 14, fontWeight: FontWeight.w500),
+            ),
+            subtitle: Text(
+              (p['secondaryText'] ?? '').toString(),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: GoogleFonts.poppins(fontSize: 12, color: Colors.grey),
+            ),
+            onTap: () => _selectPrediction(p),
+          );
+        },
+      );
+    }
+    // Default: chosen address + any saved addresses.
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      children: [
+        Row(
+          children: [
+            Image.asset("assets/star_with_location.png",
+                height: 28, width: 28),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                selectedAddress,
+                style: const TextStyle(color: Colors.black, fontSize: 13),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+        if (savedAddresses.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          Text("Saved addresses",
+              style: GoogleFonts.poppins(fontSize: 13, color: Colors.grey)),
+          const SizedBox(height: 4),
+          ...savedAddresses.map((a) => ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.bookmark_border, size: 22),
+                title: Text(
+                  (a['address'] ?? '').toString(),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.poppins(fontSize: 13),
+                ),
+                onTap: () => _selectSaved(a),
+              )),
+        ],
+      ],
     );
   }
 }

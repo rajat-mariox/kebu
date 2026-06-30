@@ -6,6 +6,7 @@ import 'package:hexcolor/hexcolor.dart';
 import 'package:kebu_driver/AppNavigation/app_navigation.dart';
 import 'package:kebu_driver/Screens/DriverModule/HomeScreen/home_screen.dart';
 import 'package:kebu_driver/Screens/CleaningModule/TechnicianDashboard/technician_dashboard.dart';
+import 'package:kebu_driver/Screens/ParcelModule/ParcelHomeScreen/parcel_home_screen.dart';
 import 'package:kebu_driver/Screens/DriverModule/SupportChatScreen/support_chat_screen.dart';
 import 'package:kebu_driver/Services/driver_api_service.dart';
 import 'package:kebu_driver/Utils/CustomToast/custome_toast.dart';
@@ -68,6 +69,8 @@ class _VerificationScreenState extends State<VerificationScreen>
         _pollTimer?.cancel();
         if (serviceType == 'cleaning') {
           replaceRoute(context, const TechnicianDashboard());
+        } else if (serviceType == 'parcel') {
+          replaceRoute(context, const ParcelHomeScreen());
         } else {
           replaceRoute(context, const HomeScreen());
         }

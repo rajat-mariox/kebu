@@ -15,7 +15,9 @@ import 'package:kebu_customer/Services/household_api_service.dart';
 class SelectDateScreen extends StatefulWidget {
   final String? categoryId;
   final String? serviceType;
-  const SelectDateScreen({super.key, this.categoryId, this.serviceType});
+  final String? serviceName;
+  const SelectDateScreen(
+      {super.key, this.categoryId, this.serviceType, this.serviceName});
 
   @override
   State<SelectDateScreen> createState() => _SelectDateScreenState();
@@ -639,7 +641,9 @@ class _SelectDateScreenState extends State<SelectDateScreen> {
       controller.setCategory(widget.categoryId!, '');
     }
     if (widget.serviceType != null) {
-      controller.setServiceType(widget.serviceType!);
+      controller.setServiceType(widget.serviceType!, widget.serviceName);
+    } else if ((widget.serviceName ?? '').isNotEmpty) {
+      controller.serviceName.value = widget.serviceName!;
     }
     pushTo(context, const CleaningReviewBookingScreen());
   }

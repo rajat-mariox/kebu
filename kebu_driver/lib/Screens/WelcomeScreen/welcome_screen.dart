@@ -6,6 +6,7 @@ import 'package:kebu_driver/AppNavigation/app_navigation.dart';
 import 'package:kebu_driver/Screens/DriverModule/IntroScreens/intro_screens_1.dart';
 import 'package:kebu_driver/Screens/on_boarding_screens/basic_details_screen.dart';
 import 'package:kebu_driver/Screens/on_boarding_screens/household_personal_info_screen.dart';
+import 'package:kebu_driver/Screens/on_boarding_screens/parcel/parcel_basic_details_screen.dart';
 import 'package:kebu_driver/Screens/on_boarding_screens/onboarding_controller.dart';
 import 'package:kebu_driver/Utils/AppColors/app_colors.dart';
 import 'package:kebu_driver/Utils/PrefsManager/prefs_manager.dart';
@@ -366,7 +367,11 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
                        const SizedBox(height: 10),
                        _continueButton(
                          label: "Continue Parcel Delivery",
-                         onTap: () {},
+                         onTap: () {
+                           final controller = Get.find<OnboardingController>();
+                           controller.serviceType.value = 'parcel';
+                           pushTo(context, const ParcelBasicDetailsScreen());
+                         },
                        ),
                      ],
                    ),

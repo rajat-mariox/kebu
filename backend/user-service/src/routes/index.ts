@@ -32,6 +32,10 @@ router.use("/customer", customerFeaturesRoutes); // Offers, Subscription, Referr
 // Driver App Routes
 router.use("/driver", driverAuthRoutes);
 router.use("/driver/app", driverRoutes);
+// The driver/provider app calls the household booking endpoints (accept,
+// available, start, complete, provider-status, …) under the /household prefix,
+// so the same router is mounted here too (customer app uses /services above).
+router.use("/household", householdRoutes);
 
 // Service Provider (Household Vendor) App Routes
 router.use("/provider", serviceProviderRoutes);

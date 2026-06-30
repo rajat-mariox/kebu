@@ -7,6 +7,18 @@ pushTo(BuildContext context, Widget name) async {
   );
 }
 
+/// Replaces the current screen with [name]. Use when advancing to the next step
+/// of a linear, irreversible flow (e.g. the household booking: en-route →
+/// arrived → in-progress) so pressing Back does NOT return to an already
+/// completed step. The partner can still resume the job from the dashboard's
+/// "On Going" list, which reopens it at the correct step.
+Future<T?> pushReplace<T>(BuildContext context, Widget name) {
+  return Navigator.pushReplacement(
+    context,
+    CupertinoPageRoute(builder: (context) => name),
+  );
+}
+
 void replaceRoute(BuildContext context, Widget name){
   Navigator.pushAndRemoveUntil(
     context,

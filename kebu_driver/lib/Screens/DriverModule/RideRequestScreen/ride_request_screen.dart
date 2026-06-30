@@ -38,6 +38,7 @@ class _RideRequestScreenState extends State<RideRequestScreen> {
   int _countdown = 30;
   Timer? _timer;
   StreamSubscription? _rideTakenSub;
+  StreamSubscription? _rideCancelledSub;
   bool _loading = false;
 
   @override
@@ -61,6 +62,21 @@ class _RideRequestScreenState extends State<RideRequestScreen> {
 
     _rideTakenSub = SocketService().onRideTaken.listen((data) {
       if (!mounted) return;
+      _stopAlert();
+      Navigator.pop(context);
+    });
+
+    // Customer cancelled while we were still showing the buzzer — dismiss the
+    // request immediately instead of leaving it on screen until the countdown
+    // expires. Ignore cancellations for a different booking.
+    _rideCancelledSub = SocketService().onRideCancelled.listen((data) {
+      if (!mounted) return;
+      final cancelledId = data['bookingId']?.toString() ?? '';
+      if (cancelledId.isNotEmpty &&
+          _bc.bookingId.value.isNotEmpty &&
+          cancelledId != _bc.bookingId.value) {
+        return;
+      }
       _stopAlert();
       Navigator.pop(context);
     });
@@ -117,6 +133,7 @@ class _RideRequestScreenState extends State<RideRequestScreen> {
     _stopAlert();
     _timer?.cancel();
     _rideTakenSub?.cancel();
+    _rideCancelledSub?.cancel();
     super.dispose();
   }
 
@@ -175,7 +192,8 @@ class _RideRequestScreenState extends State<RideRequestScreen> {
                 driverLat: _bc.currentLat.value,
                 driverLng: _bc.currentLng.value,
                 routePolyline: _bc.tripRoutePolyline.value,
-                interactive: false,
+                // Let the driver pan/zoom the visible map with their finger.
+                interactive: true,
                 // Keep pickup/drop framed above the bottom sheet.
                 bottomPadding: MediaQuery.of(context).size.height * 0.5,
               ),
@@ -184,11 +202,11 @@ class _RideRequestScreenState extends State<RideRequestScreen> {
             // Yellow header
             _header(),
 
-            // Bottom sheet
-            Align(
-              alignment: Alignment.bottomCenter,
-              child: _bottomSheet(),
-            ),
+            // Bottom sheet — draggable so the driver can pull it down to
+            // reveal and interact with the lower part of the map, then pull it
+            // back up. The empty area above the sheet is transparent, so map
+            // gestures there pass straight through.
+            _bottomSheet(),
 
             if (_loading)
               const Positioned.fill(
@@ -254,44 +272,62 @@ class _RideRequestScreenState extends State<RideRequestScreen> {
   // ─────────────── bottom sheet ───────────────
 
   Widget _bottomSheet() {
-    return Container(
-      width: double.infinity,
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.35),
-            blurRadius: 7.5,
-            offset: const Offset(0, -5),
+    return DraggableScrollableSheet(
+      // Opens roughly where the static sheet used to sit; can be dragged down
+      // to ~28% (revealing most of the map) or up to ~90%.
+      initialChildSize: 0.58,
+      minChildSize: 0.28,
+      maxChildSize: 0.9,
+      snap: true,
+      snapSizes: const [0.28, 0.58, 0.9],
+      builder: (context, scrollController) {
+        return Container(
+          width: double.infinity,
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius:
+                const BorderRadius.vertical(top: Radius.circular(20)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.35),
+                blurRadius: 7.5,
+                offset: const Offset(0, -5),
+              ),
+            ],
           ),
-        ],
-      ),
-      child: SafeArea(
-        top: false,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _sheetHeader(),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          child: SafeArea(
+            top: false,
+            // Scrollable so the sheet's own drag gesture (collapse/expand) is
+            // driven by this controller and the content stays reachable when
+            // the sheet is dragged short on small screens.
+            child: SingleChildScrollView(
+              controller: scrollController,
               child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  _pickupCard(),
-                  const SizedBox(height: 8),
-                  _destinationCard(),
-                  const SizedBox(height: 8),
-                  _earningsCard(),
+                  _sheetHeader(),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                    child: Column(
+                      children: [
+                        _pickupCard(),
+                        const SizedBox(height: 8),
+                        _destinationCard(),
+                        const SizedBox(height: 8),
+                        _earningsCard(),
+                      ],
+                    ),
+                  ),
+                  _ignoreButton(),
+                  const SizedBox(height: 16),
+                  _acceptButton(),
+                  const SizedBox(height: 12),
                 ],
               ),
             ),
-            _ignoreButton(),
-            const SizedBox(height: 16),
-            _acceptButton(),
-            const SizedBox(height: 12),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 

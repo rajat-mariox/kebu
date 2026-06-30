@@ -110,9 +110,17 @@ class OnboardingController extends GetxController {
     };
   }
 
-  Future<void> fetchVehicleTypes() async {
+  /// Fetch vehicle types for the onboarding selector. Pass [category] (e.g.
+  /// 'CARGO') to restrict the list — parcel partners only get cargo vehicles
+  /// (Cargo Bike / Pickup / Large Truck); cab onboarding omits it.
+  Future<void> fetchVehicleTypes({String? category}) async {
     try {
-      final res = await ApiClient.get('/driver/app/vehicle-types');
+      final res = await ApiClient.get(
+        '/driver/app/vehicle-types',
+        queryParams: (category != null && category.isNotEmpty)
+            ? {'category': category}
+            : null,
+      );
       if (res.success && res.data != null) {
         final list = res.data['vehicleTypes'] as List<dynamic>? ?? [];
         vehicleTypes.value = list.map((e) => Map<String, dynamic>.from(e as Map)).toList();

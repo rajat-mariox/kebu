@@ -60,6 +60,27 @@ class GooglePlacesService {
     return detail;
   }
 
+  /// Reverse-geocode a coordinate into a human-readable formatted address.
+  /// Returns an empty string on any failure.
+  static Future<String> reverseGeocode(double lat, double lng) async {
+    final url = Uri.parse(
+      'https://maps.googleapis.com/maps/api/geocode/json'
+      '?latlng=$lat,$lng'
+      '&key=$_apiKey',
+    );
+
+    final response = await http.get(url);
+    if (response.statusCode != 200) return '';
+
+    final data = json.decode(response.body);
+    if (data['status'] != 'OK') return '';
+
+    final results = data['results'] as List;
+    if (results.isEmpty) return '';
+
+    return (results[0]['formatted_address'] ?? '').toString();
+  }
+
   static Future<String> _getPostalCodeFromLatLng(double lat, double lng) async {
     final url = Uri.parse(
       'https://maps.googleapis.com/maps/api/geocode/json'
