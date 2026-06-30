@@ -6,10 +6,12 @@ class PermissionHelper {
   /// Requests all required permissions for the driver app.
   /// Returns true if all critical permissions (location) are granted.
   static Future<bool> requestAllPermissions() async {
+    // NOTE: Notification permission is intentionally NOT requested here —
+    // FCMNotificationService.initialize() already requests it via Firebase
+    // Messaging. Requesting it here too would prompt the user twice.
     final permissions = <Permission>[
       Permission.location,
       Permission.camera,
-      Permission.notification,
       Permission.phone,
       if (Platform.isAndroid) Permission.storage,
       if (Platform.isIOS) Permission.photos,

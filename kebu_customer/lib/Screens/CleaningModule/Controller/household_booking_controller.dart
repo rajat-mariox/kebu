@@ -5,8 +5,11 @@ class HouseholdBookingController extends GetxController {
   final categoryId = ''.obs;
   final categoryName = ''.obs;
 
-  // Selected service type
+  // Selected service type. `serviceType` is the slug sent to the backend;
+  // `serviceName` is the human label shown on the booking/review screens so the
+  // user always sees which service they're booking.
   final serviceType = ''.obs;
+  final serviceName = ''.obs;
 
   // Selected package (duration) — pricing flows from the backend packages API
   final packageId = ''.obs;
@@ -35,8 +38,9 @@ class HouseholdBookingController extends GetxController {
     categoryName.value = name;
   }
 
-  void setServiceType(String type) {
+  void setServiceType(String type, [String? name]) {
     serviceType.value = type;
+    if (name != null && name.isNotEmpty) serviceName.value = name;
   }
 
   void setPackage({
@@ -88,6 +92,7 @@ class HouseholdBookingController extends GetxController {
     categoryId.value = '';
     categoryName.value = '';
     serviceType.value = '';
+    serviceName.value = '';
     packageId.value = '';
     packageName.value = '';
     servicePrice.value = 0.0;

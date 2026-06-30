@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:kebu_driver/AppNavigation/app_navigation.dart';
+import 'package:kebu_driver/Screens/DriverModule/Controller/driver_booking_controller.dart';
 import 'package:kebu_driver/Screens/DriverModule/HomeScreen/home_screen.dart';
 import 'package:kebu_driver/Screens/DriverModule/IntroScreens/intro_screens_1.dart';
 import 'package:kebu_driver/Screens/CleaningModule/TechnicianDashboard/technician_dashboard.dart';
+import 'package:kebu_driver/Screens/ParcelModule/ParcelHomeScreen/parcel_home_screen.dart';
 import 'package:kebu_driver/Screens/WelcomeScreen/welcome_screen.dart';
 import 'package:kebu_driver/Screens/DriverModule/VerificationScreen/verification_screen.dart';
 import 'package:kebu_driver/Screens/on_boarding_screens/basic_details_screen.dart';
@@ -16,6 +18,13 @@ import 'package:kebu_driver/Screens/on_boarding_screens/onboarding_controller.da
 import 'package:kebu_driver/Screens/on_boarding_screens/service_categories_screen.dart';
 import 'package:kebu_driver/Screens/on_boarding_screens/vehicle_details_screen.dart';
 import 'package:kebu_driver/Screens/on_boarding_screens/vehicle_images_screen.dart';
+import 'package:kebu_driver/Screens/on_boarding_screens/parcel/parcel_basic_details_screen.dart';
+import 'package:kebu_driver/Screens/on_boarding_screens/parcel/parcel_driving_licence_screen.dart';
+import 'package:kebu_driver/Screens/on_boarding_screens/parcel/parcel_documents_screen.dart';
+import 'package:kebu_driver/Screens/on_boarding_screens/parcel/parcel_address_screen.dart';
+import 'package:kebu_driver/Screens/on_boarding_screens/parcel/parcel_bank_details_screen.dart';
+import 'package:kebu_driver/Screens/on_boarding_screens/parcel/parcel_vehicle_details_screen.dart';
+import 'package:kebu_driver/Screens/on_boarding_screens/parcel/parcel_vehicle_images_screen.dart';
 import 'package:kebu_driver/Services/driver_api_service.dart';
 import 'package:kebu_driver/Utils/AppColors/app_colors.dart';
 import 'package:kebu_driver/Utils/PermissionHelper/permission_helper.dart';
@@ -33,12 +42,16 @@ class _SplashScreenState extends State<SplashScreen> {
 
   @override
   void initState() {
-    Future.delayed(const Duration(seconds: 3), () async {
-      await Prefs.load();
-      Prefs.loadData();
-
-      // Request all permissions on first launch
+    Future.delayed(const Duration(milliseconds: 600), () async {
+      // Request all app permissions once, here. (Prefs/Firebase are already
+      // initialized in main() before runApp.)
       await PermissionHelper.requestAllPermissions();
+
+      // Permissions are resolved now — kick off GPS so the driver's location
+      // starts streaming without waiting for the next screen.
+      try {
+        Get.find<DriverBookingController>().detectCurrentLocation();
+      } catch (_) {}
 
       if (!mounted) return;
 
@@ -61,6 +74,8 @@ class _SplashScreenState extends State<SplashScreen> {
         if (status == 'approved') {
           if (serviceType == 'cleaning') {
             replaceRoute(context, const TechnicianDashboard());
+          } else if (serviceType == 'parcel') {
+            replaceRoute(context, const ParcelHomeScreen());
           } else {
             replaceRoute(context, const HomeScreen());
           }
@@ -101,6 +116,8 @@ class _SplashScreenState extends State<SplashScreen> {
           if (status == 'approved') {
             if (serviceType == 'cleaning') {
               replaceRoute(context, const TechnicianDashboard());
+            } else if (serviceType == 'parcel') {
+              replaceRoute(context, const ParcelHomeScreen());
             } else {
               replaceRoute(context, const HomeScreen());
             }
@@ -136,6 +153,30 @@ class _SplashScreenState extends State<SplashScreen> {
   /// Cleaning flow: 0 -> basic, 1 -> docs (DL skipped), 3 -> address,
   ///                4 -> bank,  5 -> service categories, 7 -> verification
   Widget _getOnboardingScreen(int completedStep, String serviceType) {
+    if (serviceType == 'parcel') {
+      // Parcel mirrors the cab flow but uses the pink Figma-themed screens.
+      switch (completedStep) {
+        case 0:
+          return const ParcelBasicDetailsScreen();
+        case 1:
+          return const ParcelDrivingLicenceScreen();
+        case 2:
+          return const ParcelDocumentsScreen();
+        case 3:
+          return const ParcelAddressScreen();
+        case 4:
+          return const ParcelBankDetailsScreen();
+        case 5:
+          return const ParcelVehicleDetailsScreen();
+        case 6:
+          return const ParcelVehicleImagesScreen();
+        case 7:
+          return const VerificationScreen();
+        default:
+          return const ParcelBasicDetailsScreen();
+      }
+    }
+
     if (serviceType == 'cleaning') {
       switch (completedStep) {
         case 0:

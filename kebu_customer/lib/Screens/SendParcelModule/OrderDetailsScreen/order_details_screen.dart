@@ -40,6 +40,9 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
 
   bool isCreating = false;
 
+  // Payment method for the delivery. Defaults to Cash on Delivery.
+  String _paymentMethod = 'CASH';
+
   Future<void> _createDelivery() async {
     if (isCreating) return;
     setState(() => isCreating = true);
@@ -71,6 +74,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       workers: widget.workers,
       scheduledAt: widget.scheduledAt,
       packageDescription: 'Parcel delivery',
+      paymentMethod: _paymentMethod,
     );
     if (!mounted) return;
     setState(() => isCreating = false);
@@ -444,52 +448,18 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                   Row(
                     children: [
                       Expanded(
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 20),
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: Column(
-                            children: [
-                              Image.asset("assets/bank_card.png", height: 35,width: 45,),
-                              const SizedBox(height: 8),
-                              Text(
-                                "Online Payment",
-                                style: GoogleFonts.poppins(
-                                    fontSize: 12,
-                                    color: Colors.black,
-                                  fontWeight: FontWeight.w500
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                            ],
-                          ),
+                        child: _paymentTile(
+                          asset: "assets/bank_card.png",
+                          label: "Online Payment",
+                          value: "UPI",
                         ),
                       ),
                       const SizedBox(width: 16),
                       Expanded(
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 20),
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: Column(
-                            children: [
-                              Image.asset("assets/case_icon.png", height: 35, width: 45,),
-                              const SizedBox(height: 8),
-                              Text(
-                                "Cash",
-                                style: GoogleFonts.poppins(
-                                    fontSize: 12,
-                                    color: Colors.grey[400],
-                                    fontWeight: FontWeight.w500
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                            ],
-                          ),
+                        child: _paymentTile(
+                          asset: "assets/case_icon.png",
+                          label: "Cash on Delivery",
+                          value: "CASH",
                         ),
                       ),
                     ],
@@ -533,6 +503,52 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                   const SizedBox(height: 20),
                 ],
               ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _paymentTile({
+    required String asset,
+    required String label,
+    required String value,
+  }) {
+    final selected = _paymentMethod == value;
+    const brandRed = Color(0xFFE43D30);
+    return GestureDetector(
+      onTap: () => setState(() => _paymentMethod = value),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 8),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: selected ? brandRed : const Color(0xFFE8E6EA),
+            width: selected ? 2 : 1,
+          ),
+        ),
+        child: Column(
+          children: [
+            Image.asset(asset, height: 35, width: 45),
+            const SizedBox(height: 8),
+            Text(
+              label,
+              textAlign: TextAlign.center,
+              style: GoogleFonts.poppins(
+                fontSize: 12,
+                color: selected ? Colors.black : Colors.grey[400],
+                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Icon(
+              selected
+                  ? Icons.radio_button_checked
+                  : Icons.radio_button_unchecked,
+              size: 18,
+              color: selected ? brandRed : Colors.grey[400],
             ),
           ],
         ),

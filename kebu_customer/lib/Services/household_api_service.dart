@@ -120,6 +120,12 @@ class HouseholdApiService {
     });
   }
 
+  /// POST /services/booking/:bookingId/search-again — re-broadcast a still-
+  /// pending booking to online partners for another search round.
+  static Future<ApiResponse> searchAgain(String bookingId) async {
+    return await ApiClient.post('/services/booking/$bookingId/search-again');
+  }
+
   /// POST /services/booking/:bookingId/rate
   static Future<ApiResponse> rateService(String bookingId, {required int rating, String? feedback}) async {
     return await ApiClient.post('/services/booking/$bookingId/rate', body: {
@@ -129,9 +135,12 @@ class HouseholdApiService {
   }
 
   /// GET /services/categories/:categoryId/packages
-  static Future<ApiResponse> getServicePackages(String categoryId, {String? date}) async {
+  /// Pass [serviceId] to get only that service's packages (backend filters by
+  /// serviceId, falling back to category-wide packages if it has none yet).
+  static Future<ApiResponse> getServicePackages(String categoryId, {String? date, String? serviceId}) async {
     final queryParams = <String, String>{};
     if (date != null) queryParams['date'] = date;
+    if (serviceId != null && serviceId.isNotEmpty) queryParams['serviceId'] = serviceId;
     return await ApiClient.get('/services/categories/$categoryId/packages', auth: false, queryParams: queryParams);
   }
 

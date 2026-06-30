@@ -33,6 +33,7 @@ interface FormDataState {
   basePrice: number;
   duration: number;
   // package
+  serviceId: string;
   durationMinutes: number;
   originalPrice: number;
   discountedPrice: number;
@@ -50,6 +51,7 @@ const emptyForm: FormDataState = {
   categoryId: "",
   basePrice: 0,
   duration: 60,
+  serviceId: "",
   durationMinutes: 60,
   originalPrice: 0,
   discountedPrice: 0,
@@ -654,6 +656,7 @@ export default function HouseholdServices() {
           type={activeTab === "categories" ? "category" : activeTab === "services" ? "service" : "package"}
           item={editItem}
           categories={categories}
+          services={services}
           parentCategories={parentCategories}
           onClose={() => { setShowModal(false); setEditItem(null); }}
           onSuccess={() => { setShowModal(false); setEditItem(null); fetchData(); }}
@@ -679,12 +682,13 @@ interface CategoryServiceModalProps {
   type: "category" | "service" | "package";
   item: EditableItem;
   categories: ServiceCategory[];
+  services: ServiceDetails[];
   parentCategories: ServiceCategory[];
   onClose: () => void;
   onSuccess: () => void;
 }
 
-function CategoryServiceModal({ type, item, categories, parentCategories, onClose, onSuccess }: CategoryServiceModalProps) {
+function CategoryServiceModal({ type, item, categories, services, parentCategories, onClose, onSuccess }: CategoryServiceModalProps) {
   const initial: FormDataState = useMemo(() => {
     if (!item) return emptyForm;
     if (item.__type === "category") {
@@ -706,6 +710,7 @@ function CategoryServiceModal({ type, item, categories, parentCategories, onClos
         ...emptyForm,
         name: s.name || "",
         description: s.description || "",
+        icon: s.icon || "",
         image: s.image || "",
         isActive: s.isActive,
         categoryId: getCategoryId(s.categoryId),
@@ -722,6 +727,7 @@ function CategoryServiceModal({ type, item, categories, parentCategories, onClos
       description: p.description || "",
       isActive: p.isAvailable ?? p.isActive ?? true,
       categoryId: getCategoryId(p.categoryId),
+      serviceId: getCategoryId(p.serviceId),
       durationMinutes: p.durationMinutes ?? 60,
       originalPrice: p.originalPrice ?? p.price ?? 0,
       discountedPrice: p.discountedPrice ?? p.price ?? 0,
@@ -760,6 +766,7 @@ function CategoryServiceModal({ type, item, categories, parentCategories, onClos
         const payload: Partial<ServiceDetails> = {
           name: formData.name,
           description: formData.description,
+          icon: formData.icon,
           image: formData.image,
           basePrice: formData.basePrice,
           price: formData.basePrice,
@@ -783,6 +790,9 @@ function CategoryServiceModal({ type, item, categories, parentCategories, onClos
           name: formData.name,
           description: formData.description,
           categoryId: formData.categoryId,
+          // Tie the package to a specific service when chosen; otherwise it's a
+          // category-wide package shown for every service in that category.
+          serviceId: formData.serviceId || undefined,
           durationMinutes: formData.durationMinutes,
           originalPrice: formData.originalPrice,
           discountedPrice: formData.discountedPrice,
@@ -880,6 +890,18 @@ function CategoryServiceModal({ type, item, categories, parentCategories, onClos
               </select>
             </div>
             <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Icon (Emoji)</label>
+              <input
+                type="text"
+                value={formData.icon}
+                onChange={(e) => setFormData({ ...formData, icon: e.target.value })}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                maxLength={4}
+                placeholder="🧹"
+              />
+              <p className="mt-1 text-xs text-gray-400">Shown on the service tile when no image is uploaded.</p>
+            </div>
+            <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Image</label>
               <ImageUpload value={formData.image} onChange={(url) => setFormData({ ...formData, image: url })} />
             </div>
@@ -925,6 +947,22 @@ function CategoryServiceModal({ type, item, categories, parentCategories, onClos
                   <option key={c._id} value={c._id}>{c.name}</option>
                 ))}
               </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Service (optional)</label>
+              <select
+                value={formData.serviceId}
+                onChange={(e) => setFormData({ ...formData, serviceId: e.target.value })}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500"
+              >
+                <option value="">All services in category (category-wide)</option>
+                {services
+                  .filter((s) => !formData.categoryId || getCategoryId(s.categoryId) === formData.categoryId)
+                  .map((s) => (
+                    <option key={s._id} value={s._id}>{s.name}</option>
+                  ))}
+              </select>
+              <p className="mt-1 text-xs text-gray-400">Pick a service to show this package only inside that service.</p>
             </div>
             <div className="grid grid-cols-3 gap-4">
               <div>

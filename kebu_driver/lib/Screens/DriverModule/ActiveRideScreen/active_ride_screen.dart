@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:kebu_driver/CommonWidgets/asset_icon.dart';
@@ -35,10 +36,15 @@ class ActiveRideScreen extends StatefulWidget {
   State<ActiveRideScreen> createState() => _ActiveRideScreenState();
 }
 
-class _ActiveRideScreenState extends State<ActiveRideScreen> {
+class _ActiveRideScreenState extends State<ActiveRideScreen>
+    with WidgetsBindingObserver {
   final DriverBookingController _bc = Get.find<DriverBookingController>();
   final TextEditingController _otpController = TextEditingController();
   final List<Worker> _workers = [];
+
+  // Safety-net poll: catches a customer cancellation if the realtime socket
+  // event was missed (transient disconnect / app backgrounded).
+  Timer? _reconcileTimer;
 
   // ── Draggable "On Route" sheet sizing (fractions of screen height) ──
   // Free drag (no snap): follows the finger, stays where released.
@@ -49,6 +55,7 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _workers.add(ever<DriverRideState>(_bc.rideState, (state) {
       if (!mounted) return;
       if (state == DriverRideState.completed) {
@@ -64,10 +71,25 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
         Navigator.of(context).popUntil((route) => route.isFirst);
       }
     }));
+    // Re-check the ride is still live every 15s as a fallback to the realtime
+    // "ride_cancelled" socket event.
+    _reconcileTimer = Timer.periodic(
+      const Duration(seconds: 15),
+      (_) => _bc.reconcileActiveRide(),
+    );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Returning to the app: immediately reconcile so a cancellation that
+    // happened while backgrounded takes effect without waiting for the timer.
+    if (state == AppLifecycleState.resumed) _bc.reconcileActiveRide();
   }
 
   @override
   void dispose() {
+    _reconcileTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     for (final w in _workers) {
       w.dispose();
     }
@@ -194,6 +216,7 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
                 dropLat: _bc.dropLat.value,
                 dropLng: _bc.dropLng.value,
                 routePolyline: route,
+                driverHeading: _bc.currentHeading.value,
                 followDriver: true,
                 navigationMode: isInProgress,
                 interactive: true,
@@ -213,13 +236,17 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
             // Top yellow app bar
             _appBar(state),
 
-            // Turn-by-turn voice-nav banner (next maneuver + distance). Shown
-            // while heading to pickup or on the trip, whenever guidance is live.
-            _navBanner(),
-
             // Floating destination pill (Figma 131:10576) — shown during
-            // the trip-in-progress phase. Hidden while the nav banner is up.
+            // the trip-in-progress phase.
             if (isInProgress) _destinationPill(),
+
+            // "Open in Google Maps" button floating on the map. Navigation is
+            // handed off to Google Maps (external turn-by-turn) rather than
+            // in-app voice guidance, so it's shown whenever there's a leg to
+            // drive — heading to pickup or on the trip.
+            if (!showOtpSheet &&
+                (state == DriverRideState.navigatingToPickup || isInProgress))
+              _openInMapsButton(),
 
             // Bottom sheet — content depends on phase. The "On Route" sheet
             // is draggable; the OTP/complete sheets stay pinned.
@@ -366,101 +393,46 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
     _bc.arrivedAtPickup();
   }
 
-  // ───────────────────────── destination pill (Figma 131:10576) ─────────────────────────
+  // ───────────────────────── open-in-google-maps button ─────────────────────────
 
-  // ───────────────────────── turn-by-turn nav banner ─────────────────────────
-
-  /// Google-nav-style banner under the app bar: a maneuver arrow, the distance
-  /// to the next turn, and the spoken instruction. Driven by the controller's
-  /// reactive guidance state; collapses to nothing when no guidance is active.
-  Widget _navBanner() {
+  /// Floating circular button on the map that opens Google Maps with
+  /// turn-by-turn navigation to the active leg's destination (pickup while
+  /// heading to collect, drop once the trip is in progress). Replaces the
+  /// in-app voice navigation — the driver navigates in Google Maps instead.
+  Widget _openInMapsButton() {
     return Positioned(
-      left: 12,
-      right: 12,
-      top: MediaQuery.of(context).padding.top + 12 + 56,
-      child: Obx(() {
-        final instr = _bc.navInstruction.value;
-        if (instr.isEmpty) return const SizedBox.shrink();
-        return Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          decoration: BoxDecoration(
-            color: _FigmaTokens.gray1, // dark nav header
-            borderRadius: BorderRadius.circular(12),
-            boxShadow: const [
-              BoxShadow(
-                color: Color(0x33000000),
-                blurRadius: 6,
-                offset: Offset(0, 2),
-              ),
-            ],
+      right: 16,
+      top: MediaQuery.of(context).padding.top + 12 + 60 + 56,
+      child: Material(
+        color: Colors.white,
+        shape: const CircleBorder(),
+        elevation: 4,
+        shadowColor: Colors.black.withValues(alpha: 0.3),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: _openDirections,
+          child: SizedBox(
+            width: 48,
+            height: 48,
+            child: Icon(
+              Icons.navigation_rounded,
+              color: HexColor('#2F6FED'),
+              size: 24,
+            ),
           ),
-          child: Row(
-            children: [
-              Icon(_maneuverIcon(_bc.navManeuver.value),
-                  color: Colors.white, size: 34),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      _bc.navDistanceText.value,
-                      style: GoogleFonts.nunito(
-                        color: Colors.white,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    Text(
-                      instr,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: GoogleFonts.nunito(
-                        color: Colors.white.withValues(alpha: 0.85),
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        height: 18 / 13,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        );
-      }),
+        ),
+      ),
     );
   }
 
-  /// Maps a Google/OSRM maneuver string to a Material turn icon.
-  IconData _maneuverIcon(String m) {
-    final s = m.toLowerCase();
-    if (s.contains('uturn') || s.contains('u-turn')) return Icons.u_turn_left;
-    if (s.contains('left')) return Icons.turn_left;
-    if (s.contains('right')) return Icons.turn_right;
-    if (s.contains('straight') || s.contains('continue')) {
-      return Icons.straight;
-    }
-    if (s.contains('merge')) return Icons.merge_type;
-    if (s.contains('roundabout') || s.contains('rotary')) {
-      return Icons.roundabout_right;
-    }
-    if (s.contains('fork')) return Icons.fork_right;
-    if (s.contains('ramp')) return Icons.ramp_right;
-    if (s.contains('destination') || s.contains('arrive')) return Icons.place;
-    return Icons.navigation;
-  }
+  // ───────────────────────── destination pill (Figma 131:10576) ─────────────────────────
 
   /// White rounded pill floating just under the app bar that shows the
-  /// drop address while the trip is in progress. Hidden while the turn-by-turn
-  /// nav banner is showing (they occupy the same slot).
+  /// drop address while the trip is in progress.
   Widget _destinationPill() {
     final addr = _bc.dropAddress.value.isNotEmpty
         ? _bc.dropAddress.value
         : 'Drop location';
-    if (_bc.navInstruction.value.isNotEmpty) {
-      return const SizedBox.shrink();
-    }
     return Positioned(
       left: 16,
       right: 16,

@@ -409,6 +409,7 @@ export default function HouseholdManagement() {
         timezone: hours.timezone,
         isEnabled: hours.isEnabled,
         closedMessage: hours.closedMessage,
+        arrivalEta: hours.arrivalEta,
       });
       setHours(res.data ?? hours);
       toast.success("Operating hours updated");
@@ -635,7 +636,7 @@ export default function HouseholdManagement() {
                 <div className="bg-white rounded-xl border p-5">
                   <h3 className="text-sm font-semibold text-gray-700 mb-4">Booking Trend</h3>
                   <ResponsiveContainer width="100%" height={280}>
-                    <LineChart data={analytics.trend}>
+                    <LineChart data={analytics.trend || []}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="date" tickFormatter={(d) => d.slice(5)} fontSize={12} />
                       <YAxis fontSize={12} />
@@ -649,7 +650,7 @@ export default function HouseholdManagement() {
                 <div className="bg-white rounded-xl border p-5">
                   <h3 className="text-sm font-semibold text-gray-700 mb-4">Revenue by Category</h3>
                   <ResponsiveContainer width="100%" height={280}>
-                    <BarChart data={analytics.byCategory}>
+                    <BarChart data={analytics.byCategory || []}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="_id" fontSize={12} />
                       <YAxis fontSize={12} />
@@ -666,8 +667,8 @@ export default function HouseholdManagement() {
                   <h3 className="text-sm font-semibold text-gray-700 mb-4">Status Breakdown</h3>
                   <ResponsiveContainer width="100%" height={250}>
                     <PieChart>
-                      <Pie data={analytics.byStatus} dataKey="count" nameKey="_id" cx="50%" cy="50%" outerRadius={90} label={({ name, percent }) => `${name} ${((percent ?? 0) * 100).toFixed(0)}%`}>
-                        {analytics.byStatus.map((_, i) => (
+                      <Pie data={analytics.byStatus || []} dataKey="count" nameKey="_id" cx="50%" cy="50%" outerRadius={90} label={({ name, percent }) => `${name} ${((percent ?? 0) * 100).toFixed(0)}%`}>
+                        {(analytics.byStatus || []).map((_, i) => (
                           <Cell key={i} fill={COLORS[i % COLORS.length]} />
                         ))}
                       </Pie>
@@ -695,7 +696,7 @@ export default function HouseholdManagement() {
                             <p className="text-sm font-semibold text-gray-900">₹{Math.round(p.revenue)}</p>
                             <div className="flex items-center gap-1 justify-end">
                               <Star className="h-3 w-3 text-yellow-500 fill-yellow-500" />
-                              <span className="text-xs text-gray-500">{p.avgRating.toFixed(1)}</span>
+                              <span className="text-xs text-gray-500">{(p.avgRating ?? 0).toFixed(1)}</span>
                             </div>
                           </div>
                         </div>
@@ -1231,6 +1232,19 @@ export default function HouseholdManagement() {
                     className="w-full border rounded-lg px-3 py-2 text-sm"
                     placeholder="Shown to customers when outside service hours"
                   />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Arrival ETA</label>
+                  <input
+                    value={hours.arrivalEta ?? ""}
+                    onChange={(e) => setHours({ ...hours, arrivalEta: e.target.value })}
+                    className="w-full border rounded-lg px-3 py-2 text-sm"
+                    placeholder="10 mins"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Shown on the customer home header: "arriving at your doorstep in &lt;this&gt;"
+                  </p>
                 </div>
 
                 <div className="pt-2">

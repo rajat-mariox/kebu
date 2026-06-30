@@ -2,18 +2,16 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 import 'package:get/get.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:hexcolor/hexcolor.dart';
 import 'package:kebu_customer/AppNavigation/app_navigation.dart';
-import 'package:kebu_customer/CommonWidgets/book_a_ride_appbar.dart';
-import 'package:kebu_customer/CommonWidgets/google_map_widget.dart';
 import 'package:kebu_customer/Screens/BookARideModule/Controller/booking_controller.dart';
 import 'package:kebu_customer/Screens/BookARideModule/LiveTracking/live_tracking_screen.dart';
 import 'package:kebu_customer/Services/socket_service.dart';
 
-/// Shown right after the rider taps "Book". Searches for a nearby driver with
-/// a live map (real pickup pin + real nearby driver cars from the backend) and
-/// a live status. Moves to [LiveTrackingScreen] as soon as a driver accepts.
+/// Shown right after the rider taps "Book". Pulses a radar "searching"
+/// animation while we look for a nearby driver and poll the live status. Moves
+/// to [LiveTrackingScreen] as soon as a driver accepts. Mirrors the household
+/// ServiceWaitingScreen's clean centred-pulse look, themed for the ride flow.
 class RideFindingScreen extends StatefulWidget {
   final String? bookingId;
   const RideFindingScreen({super.key, this.bookingId});
@@ -21,15 +19,27 @@ class RideFindingScreen extends StatefulWidget {
   State<RideFindingScreen> createState() => _RideFindingScreenState();
 }
 
-class _RideFindingScreenState extends State<RideFindingScreen> {
+class _RideFindingScreenState extends State<RideFindingScreen>
+    with SingleTickerProviderStateMixin {
   final BookingController _bc = Get.find<BookingController>();
   StreamSubscription? _noDriversSub;
   Worker? _stateWorker;
   Timer? _pollTimer;
+  late final AnimationController _pulse;
+
+  // Ride brand palette (matches the yellow Book-a-ride theme).
+  static final Color _amber = HexColor('#FFB300');
+  static final Color _yellow = HexColor('#FFD546');
+  static final Color _darkText = HexColor('#2D3134');
 
   @override
   void initState() {
     super.initState();
+    _pulse = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1600),
+    )..repeat();
+
     // Keep the nearby-driver list + ETA fresh while we search.
     _bc.fetchNearbyDrivers();
     _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
@@ -68,6 +78,7 @@ class _RideFindingScreenState extends State<RideFindingScreen> {
     _noDriversSub?.cancel();
     _stateWorker?.dispose();
     _pollTimer?.cancel();
+    _pulse.dispose();
     super.dispose();
   }
 
@@ -84,19 +95,15 @@ class _RideFindingScreenState extends State<RideFindingScreen> {
     // Prefer the backend-computed ETA for the nearest driver → "Approx X min".
     final eta = _bc.cabEtaMinutes.value;
     if (eta != null && eta > 0) {
-      return 'Approx $eta min';
+      return 'Nearest driver approx $eta min away';
     }
     final n = _bc.nearbyDrivers.length;
-    if (n <= 0) return 'Searching your area…';
-    return '$n driver${n == 1 ? '' : 's'} nearby';
+    if (n <= 0) return 'Please wait while we connect you with a nearby driver.';
+    return '$n driver${n == 1 ? '' : 's'} nearby — connecting you now.';
   }
 
   @override
   Widget build(BuildContext context) {
-    final Color darkText = HexColor("#2D3134");
-    final Color cancelRed = HexColor("#D81D0C");
-    final double bottomInset = MediaQuery.of(context).padding.bottom;
-
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
@@ -106,181 +113,139 @@ class _RideFindingScreenState extends State<RideFindingScreen> {
         if (!didPop) _cancelBooking();
       },
       child: Scaffold(
-      backgroundColor: HexColor("#FFD546"),
-      body: Stack(
-        children: [
-          // Yellow header with back button, title and notification bell.
-          bookARideAppBar(
-            height: 160,
-            context: context,
-            child: SafeArea(
-              bottom: false,
-              child: Container(
-                padding: const EdgeInsets.only(top: 14, left: 12, right: 12),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  crossAxisAlignment: CrossAxisAlignment.center,
+        backgroundColor: Colors.white,
+        body: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              children: [
+                // Lightweight top bar with a back action and the screen title.
+                Row(
                   children: [
                     InkWell(
                       onTap: _cancelBooking,
-                      child: Row(
-                        children: [
-                          Container(
-                            margin: const EdgeInsets.only(left: 4),
-                            child: Icon(Icons.arrow_back_ios,
-                                size: 20, color: darkText),
-                          ),
-                          const SizedBox(width: 4),
-                          Text(
-                            "Ride Finding",
-                            style: TextStyle(
-                              color: darkText,
-                              fontSize: 18,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ],
+                      borderRadius: BorderRadius.circular(20),
+                      child: Padding(
+                        padding: const EdgeInsets.all(4),
+                        child: Icon(Icons.arrow_back_ios,
+                            size: 20, color: _darkText),
                       ),
                     ),
-                    Image.asset("assets/ride_notification_icon.png",
-                        height: 28),
+                    const SizedBox(width: 4),
+                    Text(
+                      'Ride Finding',
+                      style: TextStyle(
+                        color: _darkText,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                   ],
                 ),
-              ),
-            ),
-          ),
-
-          // White rounded sheet: live map + status card + cancel button.
-          Container(
-            margin: const EdgeInsets.only(top: 115),
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.only(
-                topLeft: Radius.circular(40),
-                topRight: Radius.circular(40),
-              ),
-            ),
-            child: ClipRRect(
-              borderRadius: const BorderRadius.only(
-                topLeft: Radius.circular(40),
-                topRight: Radius.circular(40),
-              ),
-              child: Stack(
-                children: [
-                  // Live map: real pickup pin + the actual nearby vehicles from
-                  // the backend (GET /booking/nearby-drivers) plotted at their
-                  // real positions, refreshed every 5s.
-                  Positioned.fill(
-                    child: Obx(() => GoogleMapWidget(
-                          centerLat: _bc.pickupLat.value,
-                          centerLng: _bc.pickupLng.value,
-                          zoom: 17,
-                          // Blue pickup pin (instead of the default green).
-                          pickupMarkerHue: BitmapDescriptor.hueAzure,
-                          pickupLat: _bc.pickupLat.value,
-                          pickupLng: _bc.pickupLng.value,
-                          nearbyVehicles: _bc.nearbyDrivers.toList(),
-                          interactive: false,
-                          // Render a full (non-lite) map. Lite mode shows a
-                          // static snapshot that renders blank/white here and
-                          // whose camera doesn't follow the pickup, so it
-                          // looked zoomed-in on the wrong spot.
-                          liteModeEnabled: false,
-                          showMyLocation: false,
-                          showZoomButtons: false,
-                        )),
-                  ),
-
-                  // Bottom panel: one cohesive white sheet docked to the
-                  // bottom holding the search status + cancel action, so the
-                  // text/button no longer float bare over the map tiles.
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    child: Container(
-                      padding:
-                          EdgeInsets.fromLTRB(20, 22, 20, 18 + bottomInset),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: const BorderRadius.only(
-                          topLeft: Radius.circular(28),
-                          topRight: Radius.circular(28),
-                        ),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.10),
-                            blurRadius: 24,
-                            offset: const Offset(0, -4),
-                          ),
-                        ],
-                      ),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
+                const Spacer(),
+                // Radar pulse: three expanding, fading rings behind a gradient
+                // disc with the cab icon — the household waiting-screen look,
+                // themed yellow for the ride flow.
+                SizedBox(
+                  height: 220,
+                  width: 220,
+                  child: AnimatedBuilder(
+                    animation: _pulse,
+                    builder: (context, _) {
+                      return Stack(
+                        alignment: Alignment.center,
                         children: [
-                          Text(
-                            'Finding nearby drivers…',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: darkText,
-                              fontSize: 19,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const SizedBox(height: 6),
-                          Obx(() => Text(
-                                _statusSubtitle(),
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(
-                                  color: Color(0xFF6B7178),
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w500,
+                          _ring(0.0),
+                          _ring(0.33),
+                          _ring(0.66),
+                          Container(
+                            height: 96,
+                            width: 96,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              gradient:
+                                  LinearGradient(colors: [_yellow, _amber]),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: _amber.withValues(alpha: 0.35),
+                                  blurRadius: 18,
+                                  spreadRadius: 2,
                                 ),
-                              )),
-                          const SizedBox(height: 14),
-                          const Text(
-                            'We are connecting you with the nearest driver 🚗',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: Color(0xFF9AA0A6),
-                              fontSize: 13,
-                              height: 1.4,
+                              ],
                             ),
-                          ),
-                          const SizedBox(height: 22),
-                          // Cancel Booking button (full width)
-                          SizedBox(
-                            width: double.infinity,
-                            height: 54,
-                            child: OutlinedButton(
-                              onPressed: _cancelBooking,
-                              style: OutlinedButton.styleFrom(
-                                foregroundColor: cancelRed,
-                                side: BorderSide(color: cancelRed, width: 1.4),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                              ),
-                              child: const Text(
-                                "Cancel Booking",
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w600,
-                                  letterSpacing: -0.408,
-                                ),
-                              ),
-                            ),
+                            child: Icon(Icons.local_taxi,
+                                color: _darkText, size: 44),
                           ),
                         ],
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 40),
+                Text(
+                  'Finding nearby drivers',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: _darkText,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Obx(() => Text(
+                      _statusSubtitle(),
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 14,
+                        height: 1.4,
+                        color: Colors.grey.shade600,
+                      ),
+                    )),
+                const Spacer(),
+                SizedBox(
+                  width: double.infinity,
+                  height: 54,
+                  child: OutlinedButton(
+                    onPressed: _cancelBooking,
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: HexColor('#D81D0C'),
+                      side: BorderSide(color: HexColor('#D81D0C'), width: 1.4),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: const Text(
+                      'Cancel Booking',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: -0.408,
                       ),
                     ),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
-        ],
+        ),
       ),
+    );
+  }
+
+  /// One expanding, fading ring — three of them, phase-shifted, give a radar
+  /// "searching" pulse.
+  Widget _ring(double phaseOffset) {
+    final t = (_pulse.value + phaseOffset) % 1.0;
+    final size = 96 + t * 120;
+    return Opacity(
+      opacity: ((1 - t) * 0.45).clamp(0.0, 1.0),
+      child: Container(
+        height: size,
+        width: size,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(color: _amber, width: 2),
+        ),
       ),
     );
   }

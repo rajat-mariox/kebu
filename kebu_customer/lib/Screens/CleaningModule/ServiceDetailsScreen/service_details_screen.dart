@@ -14,12 +14,16 @@ import 'package:kebu_customer/Services/user_api_service.dart';
 
 class ServiceDetailsScreen extends StatefulWidget {
   final String? categoryId;
+  final String? serviceId;
   final String? serviceType;
+  final String? serviceName;
   final String bookingType;
   const ServiceDetailsScreen({
     super.key,
     this.categoryId,
+    this.serviceId,
     this.serviceType,
+    this.serviceName,
     this.bookingType = 'SINGLE',
   });
 
@@ -71,7 +75,8 @@ class _ServiceDetailsScreenState extends State<ServiceDetailsScreen> {
   Future<void> _loadInitial() async {
     final results = await Future.wait([
       HouseholdApiService.getAvailableDates(_categoryId),
-      HouseholdApiService.getServicePackages(_categoryId),
+      HouseholdApiService.getServicePackages(_categoryId,
+          serviceId: widget.serviceId),
       HouseholdApiService.getAvailableTimeSlots(_categoryId),
       UserApiService.getAddresses(),
     ]);
@@ -838,7 +843,9 @@ class _ServiceDetailsScreenState extends State<ServiceDetailsScreen> {
       controller.setCategory(widget.categoryId!, '');
     }
     if (widget.serviceType != null) {
-      controller.setServiceType(widget.serviceType!);
+      controller.setServiceType(widget.serviceType!, widget.serviceName);
+    } else if ((widget.serviceName ?? '').isNotEmpty) {
+      controller.serviceName.value = widget.serviceName!;
     }
     final a = selectedAddress;
     if (a != null) {

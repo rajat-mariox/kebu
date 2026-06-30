@@ -5,7 +5,6 @@ import 'package:fluttertoast/fluttertoast.dart';
 import 'package:get/get.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:flutter_tts/flutter_tts.dart';
 import 'package:kebu_driver/Utils/ApiClient/api_client.dart';
 import 'package:kebu_driver/Services/socket_service.dart';
 
@@ -62,7 +61,21 @@ class DriverBookingController extends GetxController {
   // ── Driver's own GPS location ──
   final currentLat = 0.0.obs;
   final currentLng = 0.0.obs;
+  // Direction of travel in degrees (0–360, clockwise from north), from the GPS
+  // fix. Drives the turn-by-turn camera rotation so the road ahead is "up".
+  // -1 means "unknown" (stationary / no heading from the OS yet).
+  final currentHeading = (-1.0).obs;
   StreamSubscription<Position>? _positionSub;
+
+  // Periodic location heartbeat. The position stream only emits when the
+  // driver MOVES (distanceFilter), so a stationary online driver stops
+  // refreshing DriverLocation.updatedAt. The backend hides any driver whose
+  // last update is older than its freshness window (10 min), so an
+  // idle-but-online driver would silently disappear from the customer's
+  // nearby list. This timer re-sends the last known location well within that
+  // window to keep the driver visible while parked/idle.
+  Timer? _locationHeartbeat;
+  static const Duration _locationHeartbeatInterval = Duration(minutes: 2);
 
   // Road-distance (meters) to pickup/drop, populated by Google Distance Matrix
   // via `/driver/app/distance`. Null until first response arrives.
@@ -74,17 +87,6 @@ class DriverBookingController extends GetxController {
   // Duration in minutes for the active phase, populated by /driver/app/route.
   final routeDurationMin = Rxn<int>();
 
-  // ── Turn-by-turn voice guidance ──
-  final FlutterTts _tts = FlutterTts();
-  bool _ttsReady = false;
-  /// Reactive banner shown on the active-ride map during navigation.
-  final navInstruction = ''.obs; // e.g. "Turn right onto Polk St"
-  final navDistanceText = ''.obs; // distance to the next maneuver
-  final navManeuver = ''.obs; // e.g. "turn-right" → picks the arrow icon
-  /// Steps for the active leg: {instruction, maneuver, distanceMeters, lat, lng}.
-  List<Map<String, dynamic>> _navSteps = [];
-  int _navStepIndex = 0;
-  String _lastSpoken = '';
   // Encoded polyline of the full trip (pickup → drop), drawn on the
   // take-booking / buzzer map so the driver sees the route up front.
   final tripRoutePolyline = Rxn<String>();
@@ -155,7 +157,6 @@ class DriverBookingController extends GetxController {
     super.onInit();
     _listenToSocket();
     detectCurrentLocation();
-    _initTts();
   }
 
   @override
@@ -166,94 +167,7 @@ class DriverBookingController extends GetxController {
     }
     _positionSub?.cancel();
     _positionSub = null;
-    _tts.stop();
     super.onClose();
-  }
-
-  // ── Voice guidance ───────────────────────────────────────────────
-  Future<void> _initTts() async {
-    try {
-      await _tts.setLanguage('en-US');
-      await _tts.setSpeechRate(0.5);
-      await _tts.setVolume(1.0);
-      _ttsReady = true;
-    } catch (_) {
-      _ttsReady = false;
-    }
-  }
-
-  /// Voice/banner guidance runs ONLY during the trip (pickup → destination),
-  /// not while heading to the pickup — that leg uses the plain tracking map.
-  bool get _navActive => rideState.value == DriverRideState.inProgress;
-
-  /// Store the decoded turn-by-turn steps for the active leg and refresh the
-  /// banner. Called whenever a fresh route arrives from `/driver/app/route`.
-  void _setNavSteps(List raw) {
-    _navSteps = raw
-        .whereType<Map>()
-        .map((e) => Map<String, dynamic>.from(e))
-        .toList();
-    _navStepIndex = 0;
-    _lastSpoken = '';
-    _updateNavGuidance();
-  }
-
-  /// Recompute the next-maneuver banner from the driver's current position,
-  /// advance past maneuvers already reached, and speak each one once when the
-  /// driver gets within announcing range.
-  void _updateNavGuidance() {
-    if (!_navActive || _navSteps.isEmpty) {
-      _clearNav();
-      return;
-    }
-    if (currentLat.value == 0 || currentLng.value == 0) return;
-    if (_navStepIndex >= _navSteps.length) {
-      _clearNav();
-      return;
-    }
-
-    double distTo(Map s) => Geolocator.distanceBetween(
-          currentLat.value,
-          currentLng.value,
-          (s['lat'] as num).toDouble(),
-          (s['lng'] as num).toDouble(),
-        );
-
-    var step = _navSteps[_navStepIndex];
-    var dist = distTo(step);
-    // Skip maneuvers we've already driven past.
-    while (dist < 30 && _navStepIndex < _navSteps.length - 1) {
-      _navStepIndex++;
-      step = _navSteps[_navStepIndex];
-      dist = distTo(step);
-    }
-
-    final instr = (step['instruction'] ?? '').toString();
-    navInstruction.value = instr;
-    navManeuver.value = (step['maneuver'] ?? '').toString();
-    navDistanceText.value = dist >= 1000
-        ? '${(dist / 1000).toStringAsFixed(1)} km'
-        : '${dist.round()} m';
-
-    // Announce each instruction once, when within range.
-    if (instr.isNotEmpty && dist <= 250 && instr != _lastSpoken) {
-      _speak(dist >= 100 ? 'In ${dist.round()} meters, $instr' : instr);
-      _lastSpoken = instr;
-    }
-  }
-
-  Future<void> _speak(String text) async {
-    if (!_ttsReady || text.isEmpty) return;
-    try {
-      await _tts.stop();
-      await _tts.speak(text);
-    } catch (_) {}
-  }
-
-  void _clearNav() {
-    navInstruction.value = '';
-    navDistanceText.value = '';
-    navManeuver.value = '';
   }
 
   void _listenToSocket() {
@@ -320,10 +234,10 @@ class DriverBookingController extends GetxController {
         if (!await Geolocator.isLocationServiceEnabled()) return;
       }
 
-      LocationPermission permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
+      // Location permission is requested centrally by PermissionHelper
+      // (SplashScreen). Here we only check it, so the driver is never prompted
+      // a second time by the geolocator plugin.
+      final permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
         return;
@@ -370,6 +284,13 @@ class DriverBookingController extends GetxController {
       if (_disposed) return;
       currentLat.value = pos.latitude;
       currentLng.value = pos.longitude;
+      // Only trust the GPS heading while actually moving — a stationary fix
+      // reports a stale/garbage bearing. Keep the last good heading otherwise
+      // so the nav camera doesn't spin when stopped at a light. (>1 m/s ≈
+      // 3.6 km/h, slow-walk pace, filters out jitter while parked.)
+      if (pos.speed > 1.0 && pos.heading >= 0) {
+        currentHeading.value = pos.heading;
+      }
 
       // Send location to server via socket if online
       if (isOnline.value) {
@@ -379,8 +300,22 @@ class DriverBookingController extends GetxController {
 
       // Refresh Google road-distance for the active ride.
       _maybeRefreshRoadDistance();
-      // Update the turn-by-turn banner / speak the next maneuver.
-      _updateNavGuidance();
+    });
+
+    // Keep the driver "fresh" on the backend even when stationary (see field).
+    _startLocationHeartbeat();
+  }
+
+  /// Re-sends the last known location on a fixed interval so a stationary
+  /// online driver keeps refreshing DriverLocation.updatedAt and stays inside
+  /// the backend's freshness window. Only emits while online with a valid fix.
+  void _startLocationHeartbeat() {
+    _locationHeartbeat?.cancel();
+    _locationHeartbeat = Timer.periodic(_locationHeartbeatInterval, (_) {
+      if (_disposed) return;
+      if (!isOnline.value) return;
+      if (currentLat.value == 0 || currentLng.value == 0) return;
+      _socket.updateLocation(currentLat.value, currentLng.value);
     });
   }
 
@@ -444,19 +379,16 @@ class DriverBookingController extends GetxController {
       final meters = km != null ? km * 1000.0 : null;
       final poly = (data['polyline'] as String?) ?? '';
       final durMin = (data['durationMin'] as num?)?.toInt();
-      final steps = data['steps'];
 
       // Guard against stale responses arriving after the phase changed.
       if (isPickupPhase && rideState.value == DriverRideState.navigatingToPickup) {
         if (meters != null) roadDistanceToPickupMeters.value = meters;
         if (poly.isNotEmpty) routePolyline.value = poly;
         if (durMin != null) routeDurationMin.value = durMin;
-        if (steps is List) _setNavSteps(steps);
       } else if (isDropPhase && rideState.value == DriverRideState.inProgress) {
         if (meters != null) roadDistanceToDropMeters.value = meters;
         if (poly.isNotEmpty) routePolyline.value = poly;
         if (durMin != null) routeDurationMin.value = durMin;
-        if (steps is List) _setNavSteps(steps);
       }
     } catch (e) {
       debugPrint('[DriverBookingCtrl] route fetch failed: $e');
@@ -780,6 +712,33 @@ class DriverBookingController extends GetxController {
     return false;
   }
 
+  /// Safety net for missed realtime events: re-check with the backend whether
+  /// the ride we're showing is still active. If the server reports no active
+  /// booking (or a different one) — e.g. the customer cancelled while our
+  /// socket was momentarily down or the app was backgrounded — clear the ride
+  /// so the active-ride screen returns the driver home. Only acts on a
+  /// definitive successful response, never on a network error, so a transient
+  /// failure can't wrongly kick the driver out of a live ride.
+  Future<void> reconcileActiveRide() async {
+    if (bookingId.value.isEmpty) return;
+    final res = await ApiClient.get('/driver/app/booking/active');
+    if (!res.success) return; // network/transient issue — leave the ride as-is
+    Map? booking = res.data is Map ? res.data as Map : null;
+    if (booking != null && booking['booking'] is Map) {
+      booking = booking['booking'] as Map;
+    }
+    final activeId = (booking?['_id'] ?? '').toString();
+    if (bookingId.value.isEmpty) return; // ride ended while we were awaiting
+    if (activeId.isEmpty || activeId != bookingId.value) {
+      resetBooking();
+      Fluttertoast.showToast(
+        msg: 'This ride was cancelled.',
+        backgroundColor: Colors.orange,
+        textColor: Colors.white,
+      );
+    }
+  }
+
   /// Open native turn-by-turn navigation to (lat,lng) using Google Maps when
   /// available, falling back to Apple Maps on iOS, then to a web URL.
   Future<void> openExternalNavigation(double lat, double lng, {String? label}) async {
@@ -822,11 +781,6 @@ class DriverBookingController extends GetxController {
   }
 
   void resetBooking() {
-    _navSteps = [];
-    _navStepIndex = 0;
-    _lastSpoken = '';
-    _clearNav();
-    _tts.stop();
     rideState.value = DriverRideState.idle;
     bookingId.value = '';
     bookingOtp.value = '';

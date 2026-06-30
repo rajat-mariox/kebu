@@ -34,6 +34,8 @@ class SocketService {
       StreamController<Map<String, dynamic>>.broadcast();
   final _serviceBookingStatusController =
       StreamController<Map<String, dynamic>>.broadcast();
+  final _servicePaymentReceivedController =
+      StreamController<Map<String, dynamic>>.broadcast();
   final _providerLocationController =
       StreamController<Map<String, dynamic>>.broadcast();
   // Driver availability (online/offline) changes broadcast by the backend to
@@ -47,6 +49,8 @@ class SocketService {
       _serviceBookingAcceptedController.stream;
   Stream<Map<String, dynamic>> get onServiceBookingStatus =>
       _serviceBookingStatusController.stream;
+  Stream<Map<String, dynamic>> get onServicePaymentReceived =>
+      _servicePaymentReceivedController.stream;
   Stream<Map<String, dynamic>> get onProviderLocation =>
       _providerLocationController.stream;
   Stream<Map<String, dynamic>> get onNoDriversAvailable =>
@@ -133,6 +137,10 @@ class SocketService {
       _serviceBookingStatusController.add(Map<String, dynamic>.from(data));
     });
 
+    _socket!.on('service_payment_received', (data) {
+      _servicePaymentReceivedController.add(Map<String, dynamic>.from(data));
+    });
+
     _socket!.on('provider_location', (data) {
       _providerLocationController.add(Map<String, dynamic>.from(data));
     });
@@ -184,6 +192,7 @@ class SocketService {
     _noDriversController.close();
     _serviceBookingAcceptedController.close();
     _serviceBookingStatusController.close();
+    _servicePaymentReceivedController.close();
     _providerLocationController.close();
     _driverStatusController.close();
   }

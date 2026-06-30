@@ -8,6 +8,7 @@ import 'package:kebu_customer/CommonWidgets/google_map_widget.dart';
 import 'package:kebu_customer/Screens/BookARideModule/Controller/booking_controller.dart';
 import 'package:kebu_customer/Screens/CleaningModule/SelectDateScreen/select_date_screen.dart';
 import 'package:kebu_customer/Screens/CleaningModule/ServiceDetailsScreen/service_details_screen.dart';
+import 'package:kebu_customer/Screens/CleaningModule/ServiceInfoScreen/service_info_screen.dart';
 import 'package:kebu_customer/Services/customer_features_api_service.dart';
 import 'package:kebu_customer/Services/household_api_service.dart';
 
@@ -22,7 +23,9 @@ class _PreBookingForCleaningState extends State<PreBookingForCleaning> {
   static final Color _pink = HexColor('#E61978');
   static final Color _purple = HexColor('#461E98');
   static final Color _accentPink = HexColor('#D50069');
-  static final Color _cardBorder = HexColor('#D5D5D5');
+  // Time-slot card outline in the open/active design (Figma node 732:33890):
+  // a soft pink rather than the neutral grey used elsewhere.
+  static final Color _slotBorder = HexColor('#F0B8D4');
 
   List<dynamic> servicePackages = [];
   List<dynamic> starterPacks = [];
@@ -44,6 +47,10 @@ class _PreBookingForCleaningState extends State<PreBookingForCleaning> {
   String closeTime = '20:00';
   String closedMessage =
       "We are currently closed. Please check back during our service hours.";
+  // Customer-facing arrival promise shown in the header ("arriving at your
+  // doorstep in <arrivalEta>"). Backend-driven via getServiceHours; the default
+  // keeps the Figma copy if the backend omits the field.
+  String arrivalEta = '10 mins';
 
   @override
   void initState() {
@@ -132,6 +139,8 @@ class _PreBookingForCleaningState extends State<PreBookingForCleaning> {
           openTime = (h['openTime'] ?? '06:00').toString();
           closeTime = (h['closeTime'] ?? '20:00').toString();
           closedMessage = (h['closedMessage'] ?? closedMessage).toString();
+          final eta = (h['arrivalEta'] ?? '').toString().trim();
+          if (eta.isNotEmpty) arrivalEta = eta;
         }
         if (results[4].success && results[4].data != null) {
           final all = (results[4].data['offers'] as List?) ?? const [];
@@ -387,20 +396,28 @@ class _PreBookingForCleaningState extends State<PreBookingForCleaning> {
     final reopen = _hourLabel(openTime);
     return RichText(
       text: TextSpan(
-        style: GoogleFonts.poppins(color: Colors.white, fontSize: 16),
+        style: GoogleFonts.poppins(
+            color: Colors.white, fontSize: 16, letterSpacing: -0.4),
         children: isOpen
             ? [
-                const TextSpan(text: 'OPEN NOW '),
+                // Figma node 732:33651 — "arriving at your doorstep in 10 mins"
+                // with the ETA in gold semibold.
+                const TextSpan(text: 'arriving at your doorstep in '),
                 TextSpan(
-                  text: 'TILL ${_hourLabel(closeTime)}',
-                  style: const TextStyle(fontWeight: FontWeight.w600),
+                  text: arrivalEta,
+                  style: TextStyle(
+                    color: HexColor('#FFD546'),
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ]
             : [
-                TextSpan(text: 'BACK AT $reopen '),
+                // Figma (node 687:41448) renders this title-cased with the
+                // last word in medium weight: "Back at 6 am Tomorrow".
+                TextSpan(text: 'Back at ${reopen.toLowerCase()} '),
                 const TextSpan(
-                  text: 'TOMORROW',
-                  style: TextStyle(fontWeight: FontWeight.w600),
+                  text: 'Tomorrow',
+                  style: TextStyle(fontWeight: FontWeight.w500),
                 ),
               ],
       ),
@@ -408,31 +425,10 @@ class _PreBookingForCleaningState extends State<PreBookingForCleaning> {
   }
 
   Widget _closedSign() {
-    if (isOpen) {
-      return Container(
-        width: 96,
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Column(
-          children: [
-            Text("We're Open",
-                style: GoogleFonts.poppins(
-                    color: HexColor('#1E9E55'),
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700)),
-            const SizedBox(height: 2),
-            Text('Experts Ready',
-                style: GoogleFonts.poppins(
-                    color: HexColor('#12007F'),
-                    fontSize: 10,
-                    fontWeight: FontWeight.w600)),
-          ],
-        ),
-      );
-    }
+    // Open state (Figma node 732:33591) keeps the header right side clear —
+    // the logo + arrival line span the full width. Only the closed state shows
+    // a sign.
+    if (isOpen) return const SizedBox.shrink();
     return Image.asset(
       'assets/we_are_closed.png',
       width: 100,
@@ -444,30 +440,43 @@ class _PreBookingForCleaningState extends State<PreBookingForCleaning> {
   // ==================== TIME SLOTS ====================
 
   Widget _buildTimeSlots() {
+    // Fully backend-driven: durations/prices come from getServicePackages.
+    // While loading show a spinner; if the backend returns none, show an empty
+    // state instead of inventing hardcoded slots.
+    if (isLoading) {
+      return const SizedBox(
+        height: 139,
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+    if (servicePackages.isEmpty) {
+      return Container(
+        height: 139,
+        margin: const EdgeInsets.symmetric(horizontal: 16),
+        alignment: Alignment.center,
+        child: Text(
+          'No slots available right now',
+          style: GoogleFonts.poppins(fontSize: 13, color: Colors.grey.shade600),
+        ),
+      );
+    }
     final cards = <Widget>[];
-    if (servicePackages.isNotEmpty) {
-      for (final pkg in servicePackages) {
-        final name = (pkg['name'] ?? '').toString();
-        final original = pkg['originalPrice'];
-        final discounted = pkg['discountedPrice'];
-        final offer = pkg['appliedOffer'] as Map<String, dynamic>?;
-        final displayPrice = offer != null
-            ? '${offer['finalPrice']}'
-            : '${discounted ?? original ?? 0}';
-        final strikePrice = '${original ?? discounted ?? 0}';
-        final savingsPct = offer != null
-            ? (offer['savingsPercent'] as num?)?.toInt() ??
-                (pkg['discountPercentage'] as num?)?.toInt() ??
-                0
-            : (pkg['discountPercentage'] as num?)?.toInt() ?? 0;
-        cards.add(_slotCard(name, displayPrice, strikePrice, savingsPct));
-      }
-    } else {
-      cards.addAll([
-        _slotCard('1 hr', '99', '199', 41),
-        _slotCard('1.5 hr', '149', '255', 41),
-        _slotCard('2 hr', '200', '399', 41),
-      ]);
+    for (final pkg in servicePackages) {
+      final name = (pkg['name'] ?? '').toString();
+      final original = pkg['originalPrice'];
+      final discounted = pkg['discountedPrice'];
+      final offer = pkg['appliedOffer'] as Map<String, dynamic>?;
+      final displayPrice = offer != null
+          ? '${offer['finalPrice']}'
+          : '${discounted ?? original ?? 0}';
+      final strikePrice = '${original ?? discounted ?? 0}';
+      final savingsPct = offer != null
+          ? (offer['savingsPercent'] as num?)?.toInt() ??
+              (pkg['discountPercentage'] as num?)?.toInt() ??
+              0
+          : (pkg['discountPercentage'] as num?)?.toInt() ?? 0;
+      cards.add(_slotCard(name, displayPrice, strikePrice, savingsPct,
+          pkg is Map ? pkg : const {}));
     }
     return SizedBox(
       height: 139,
@@ -481,23 +490,24 @@ class _PreBookingForCleaningState extends State<PreBookingForCleaning> {
     );
   }
 
-  Widget _slotCard(String time, String price, String oldPrice, int savingsPct) {
+  Widget _slotCard(
+      String time, String price, String oldPrice, int savingsPct, Map pkg) {
     return Container(
       width: 123,
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: _cardBorder),
+        border: Border.all(color: _slotBorder),
       ),
       child: Column(
         children: [
-          // Discount banner
+          // Discount banner (Figma node 732:33891 — light-pink bg, pink text).
           Container(
             width: double.infinity,
-            height: 26,
+            height: 25,
             alignment: Alignment.center,
             decoration: BoxDecoration(
-              color: _cardBorder,
+              color: HexColor('#FEE2F1'),
               borderRadius: const BorderRadius.only(
                 topLeft: Radius.circular(14),
                 topRight: Radius.circular(14),
@@ -507,6 +517,7 @@ class _PreBookingForCleaningState extends State<PreBookingForCleaning> {
               savingsPct > 0 ? '$savingsPct% OFF' : 'OFFER',
               style: GoogleFonts.poppins(
                   fontSize: 10,
+                  color: HexColor('#E51979'),
                   fontWeight: FontWeight.w700,
                   letterSpacing: -0.4),
             ),
@@ -517,7 +528,7 @@ class _PreBookingForCleaningState extends State<PreBookingForCleaning> {
                   fontSize: 18,
                   fontWeight: FontWeight.w700,
                   letterSpacing: -0.4)),
-          const SizedBox(height: 2),
+          const SizedBox(height: 4),
           Text.rich(
             TextSpan(children: [
               TextSpan(
@@ -537,28 +548,51 @@ class _PreBookingForCleaningState extends State<PreBookingForCleaning> {
           ),
           const Spacer(),
           Padding(
-            padding: const EdgeInsets.only(bottom: 9, left: 13, right: 13),
-            child: Container(
-              height: 31,
-              width: double.infinity,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: isOpen ? HexColor('#E1F4E5') : Colors.white,
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(
-                    color: isOpen ? HexColor('#4FBF67') : Colors.black),
-              ),
-              child: Text(
-                isOpen ? 'Available' : 'Unavailable',
-                style: GoogleFonts.poppins(
-                  fontSize: 12,
-                  color: isOpen ? HexColor('#2E7D32') : Colors.black,
-                  fontWeight: FontWeight.w500,
+            padding: const EdgeInsets.only(bottom: 13, left: 13, right: 13),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(6),
+              onTap: isOpen ? () => _openSlot(pkg) : null,
+              child: Container(
+                height: 31,
+                width: double.infinity,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.5),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(
+                      color: isOpen ? _accentPink : Colors.black),
+                ),
+                child: Text(
+                  isOpen ? 'Book Now' : 'Unavailable',
+                  style: GoogleFonts.poppins(
+                    fontSize: 12,
+                    color: Colors.black,
+                    fontWeight: FontWeight.w400,
+                    letterSpacing: -0.4,
+                  ),
                 ),
               ),
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  /// "Book Now" on a duration slot → service details, seeded with whatever
+  /// service/category context the package carries so the next screen scopes to
+  /// it. Falls back to the generic single-booking flow when none is present.
+  void _openSlot(Map pkg) {
+    final serviceId = (pkg['serviceId'] ?? pkg['_id'] ?? '').toString();
+    final categoryId = (pkg['categoryId'] ?? '').toString();
+    final slug = (pkg['slug'] ?? pkg['serviceType'] ?? '').toString();
+    pushTo(
+      context,
+      ServiceDetailsScreen(
+        bookingType: 'SINGLE',
+        serviceId: serviceId.isNotEmpty ? serviceId : null,
+        categoryId: categoryId.isNotEmpty ? categoryId : null,
+        serviceType: slug.isNotEmpty ? slug : null,
       ),
     );
   }
@@ -718,13 +752,9 @@ class _PreBookingForCleaningState extends State<PreBookingForCleaning> {
     return Expanded(
       child: InkWell(
         borderRadius: BorderRadius.circular(10),
-        onTap: () => pushTo(
-          context,
-          // Multiple booking → date-range picker; single → service details.
-          bookingType == 'MULTIPLE'
-              ? const SelectDateScreen()
-              : ServiceDetailsScreen(bookingType: bookingType),
-        ),
+        // A package is only a duration/price — the service is chosen separately,
+        // so ask which service before sending the user into the booking flow.
+        onTap: () => _pickServiceThenBook(bookingType),
         child: Container(
           height: 74,
           padding: const EdgeInsets.symmetric(horizontal: 10),
@@ -748,6 +778,104 @@ class _PreBookingForCleaningState extends State<PreBookingForCleaning> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  /// Home prebook has no service context, so let the user pick one first, then
+  /// continue into the matching booking flow scoped to that service. Falls back
+  /// to the generic flow only if no services are available yet.
+  void _pickServiceThenBook(String bookingType) {
+    if (serviceTypes.isEmpty) {
+      pushTo(
+        context,
+        bookingType == 'MULTIPLE'
+            ? const SelectDateScreen()
+            : ServiceDetailsScreen(bookingType: bookingType),
+      );
+      return;
+    }
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 2),
+              child: Text('Select a service',
+                  style: GoogleFonts.poppins(
+                      fontSize: 16, fontWeight: FontWeight.w600)),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Text('Choose which service you want to book',
+                  style:
+                      GoogleFonts.poppins(fontSize: 13, color: Colors.black54)),
+            ),
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: serviceTypes.whereType<Map>().map((raw) {
+                  final s = Map<String, dynamic>.from(raw);
+                  final name =
+                      (s['serviceType'] ?? s['name'] ?? '').toString();
+                  final slug = (s['slug'] ?? '').toString();
+                  final id = (s['_id'] ?? '').toString();
+                  final catId = (s['categoryId'] ?? '').toString();
+                  final asset = _serviceAssetFor(name);
+                  return ListTile(
+                    leading: SizedBox(
+                      width: 36,
+                      height: 36,
+                      child: asset.isNotEmpty
+                          ? Image.asset(asset,
+                              fit: BoxFit.contain,
+                              errorBuilder: (_, __, ___) => Icon(
+                                  Icons.cleaning_services,
+                                  color: _accentPink))
+                          : Icon(Icons.cleaning_services, color: _accentPink),
+                    ),
+                    title: Text(name,
+                        style: GoogleFonts.poppins(
+                            fontSize: 14, fontWeight: FontWeight.w500)),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () {
+                      Navigator.pop(context);
+                      if (bookingType == 'MULTIPLE') {
+                        pushTo(
+                          context,
+                          SelectDateScreen(
+                            categoryId: catId.isNotEmpty ? catId : null,
+                            serviceType: slug.isNotEmpty ? slug : null,
+                            serviceName: name.isNotEmpty ? name : null,
+                          ),
+                        );
+                      } else {
+                        pushTo(
+                          context,
+                          ServiceDetailsScreen(
+                            categoryId: catId.isNotEmpty ? catId : null,
+                            serviceId: id.isNotEmpty ? id : null,
+                            serviceType: slug.isNotEmpty ? slug : null,
+                            serviceName: name.isNotEmpty ? name : null,
+                            bookingType: 'SINGLE',
+                          ),
+                        );
+                      }
+                    },
+                  );
+                }).toList(),
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
         ),
       ),
     );
@@ -801,17 +929,39 @@ class _PreBookingForCleaningState extends State<PreBookingForCleaning> {
   }
 
   Widget _serviceTile(Map service) {
-    final title = (service['name'] ?? service['title'] ?? '').toString();
-    final image = (service['image'] ?? service['icon'] ?? '').toString();
+    // Backend stores the label as `serviceType`; keep `name`/`title` as
+    // fallbacks for any legacy payloads.
+    final title = (service['serviceType'] ??
+            service['name'] ??
+            service['title'] ??
+            '')
+        .toString();
+    final image = (service['image'] ?? '').toString();
+    final icon = (service['icon'] ?? '').toString();
     final slug = (service['slug'] ?? '').toString();
+    final categoryId = (service['categoryId'] ?? '').toString();
     final isNetwork =
         image.startsWith('http://') || image.startsWith('https://');
-    final fallbackAsset = _serviceAssetFor(title);
+    // An emoji icon (e.g. "🧹") has no ascii letters and isn't a URL/asset —
+    // render it as a glyph instead of trying (and failing) to load an image.
+    final isEmojiIcon = image.isEmpty &&
+        icon.isNotEmpty &&
+        !icon.startsWith('http') &&
+        !icon.startsWith('assets/') &&
+        !RegExp(r'[a-zA-Z]').hasMatch(icon);
+    // A bundled illustration for a recognised service name ('' if unknown).
+    final figmaAsset = _serviceAssetFor(title);
     return InkWell(
       borderRadius: BorderRadius.circular(10),
       onTap: () => pushTo(
         context,
-        ServiceDetailsScreen(serviceType: slug.isNotEmpty ? slug : null),
+        // Tapping a service opens its info screen (inclusions / exclusions /
+        // requirements); "Book Now"/"Pre Book" there continue to the booking
+        // flow. Category drives the tab strip; slug pre-selects this service.
+        ServiceInfoScreen(
+          categoryId: categoryId.isNotEmpty ? categoryId : 'default',
+          initialSlug: slug.isNotEmpty ? slug : null,
+        ),
       ),
       child: Container(
         height: 74,
@@ -836,21 +986,13 @@ class _PreBookingForCleaningState extends State<PreBookingForCleaning> {
             SizedBox(
               height: 56,
               width: 56,
-              child: image.isEmpty
-                  ? Image.asset(fallbackAsset, fit: BoxFit.contain,
-                      errorBuilder: (_, __, ___) => _serviceIconFallback())
-                  : (isNetwork
-                      ? Image.network(image,
-                          fit: BoxFit.contain,
-                          errorBuilder: (_, __, ___) => Image.asset(
-                              fallbackAsset,
-                              fit: BoxFit.contain,
-                              errorBuilder: (_, __, ___) =>
-                                  _serviceIconFallback()))
-                      : Image.asset(image,
-                          fit: BoxFit.contain,
-                          errorBuilder: (_, __, ___) =>
-                              _serviceIconFallback())),
+              child: _serviceIcon(
+                image: image,
+                isNetwork: isNetwork,
+                figmaAsset: figmaAsset,
+                icon: icon,
+                isEmojiIcon: isEmojiIcon,
+              ),
             ),
           ],
         ),
@@ -858,30 +1000,68 @@ class _PreBookingForCleaningState extends State<PreBookingForCleaning> {
     );
   }
 
+  /// Resolve the tile artwork. Priority: an admin-uploaded image, then the
+  /// bundled Figma illustration matched by service name, then an emoji icon
+  /// (for custom services), then a neutral placeholder.
+  Widget _serviceIcon({
+    required String image,
+    required bool isNetwork,
+    required String figmaAsset,
+    required String icon,
+    required bool isEmojiIcon,
+  }) {
+    if (image.isNotEmpty) {
+      return isNetwork
+          ? Image.network(image,
+              fit: BoxFit.contain,
+              errorBuilder: (_, __, ___) =>
+                  _illustrationOrEmoji(figmaAsset, icon, isEmojiIcon))
+          : Image.asset(image,
+              fit: BoxFit.contain,
+              errorBuilder: (_, __, ___) =>
+                  _illustrationOrEmoji(figmaAsset, icon, isEmojiIcon));
+    }
+    return _illustrationOrEmoji(figmaAsset, icon, isEmojiIcon);
+  }
+
+  Widget _illustrationOrEmoji(String figmaAsset, String icon, bool isEmojiIcon) {
+    if (figmaAsset.isNotEmpty) {
+      return Image.asset(figmaAsset,
+          fit: BoxFit.contain,
+          errorBuilder: (_, __, ___) =>
+              isEmojiIcon ? _emojiIcon(icon) : _serviceIconFallback());
+    }
+    return isEmojiIcon ? _emojiIcon(icon) : _serviceIconFallback();
+  }
+
+  Widget _emojiIcon(String icon) =>
+      Center(child: Text(icon, style: const TextStyle(fontSize: 34)));
+
   Widget _serviceIconFallback() => Icon(
         Icons.home_repair_service_outlined,
         color: Colors.grey.shade400,
       );
 
-  /// Map a service name to a bundled illustration so tiles look right even
-  /// before the backend image loads.
+  /// Map a recognised service name to its bundled Figma illustration. Returns
+  /// '' for unrecognised names so a custom service falls back to its emoji.
   String _serviceAssetFor(String name) {
     final n = name.toLowerCase();
     if (n.contains('everyday') || n.contains('daily')) {
       return 'assets/every_day_cleaning.png';
     }
     if (n.contains('weekly')) return 'assets/weekly_cleaning.png';
+    // 'dish' must be checked before 'wash' — "dishwashing" contains "wash".
+    if (n.contains('dish')) return 'assets/diswash.png';
     if (n.contains('laundry') || n.contains('wash')) {
       return 'assets/washing_machine.png';
     }
-    if (n.contains('dish')) return 'assets/diswash.png';
     if (n.contains('bath') || n.contains('toilet')) {
       return 'assets/bathroom_toilet.png';
     }
     if (n.contains('kitchen') || n.contains('cook') || n.contains('prep')) {
       return 'assets/kitchen_prep.png';
     }
-    return 'assets/mob_and_bucket.png';
+    return '';
   }
 
   Widget _servicesEmptyState() {

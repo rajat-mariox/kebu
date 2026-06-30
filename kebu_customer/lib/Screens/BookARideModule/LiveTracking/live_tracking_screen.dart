@@ -24,6 +24,31 @@ class LiveTrackingScreen extends StatefulWidget {
 class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
   final BookingController _bc = Get.find<BookingController>();
 
+  // ── Draggable in-progress trip panel (fractions of the map height) ──
+  // The rider can drag the sheet down to reveal the map (kept centred on the
+  // driver) and pull it back up. Snaps between collapsed / default / expanded.
+  static const double _sheetMinFrac = 0.16;
+  static const double _sheetInitialFrac = 0.5;
+  static const double _sheetMaxFrac = 0.9;
+
+  // Current sheet height in pixels, fed to the map as bottom focal padding so
+  // the driver stays centred in the map area still visible above the sheet.
+  double _sheetExtentPx = 0;
+
+  /// Keeps the map's focal point on the driver as the trip sheet is dragged:
+  /// the more the sheet covers, the more bottom padding the map gets, so the
+  /// driver marker stays centred in the exposed map area. Rounded + thresholded
+  /// to avoid rebuilding the map on every drag frame.
+  void _onSheetExtentChanged(double extentFraction) {
+    if (!mounted) return;
+    final h = MediaQuery.of(context).size.height;
+    final px = (extentFraction * h).clamp(0.0, h * 0.6);
+    final rounded = (px / 24).round() * 24.0;
+    if ((rounded - _sheetExtentPx).abs() >= 24) {
+      setState(() => _sheetExtentPx = rounded);
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -171,7 +196,7 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
                       driverLng: _bc.driverLng.value,
                       driverHeading: _bc.driverHeading.value,
                       driverVehicleType: _bc.bookedVehicleType.value,
-                      // Live driver→destination road path drawn as the yellow
+                      // Live driver→destination road path drawn as the blue
                       // route line. The controller already swaps this between
                       // driver→pickup and driver→drop as the ride progresses.
                       routePolyline: _bc.routePolyline.value,
@@ -184,7 +209,14 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
                       // destination.
                       followTargetLat: inProgress ? _bc.dropLat.value : null,
                       followTargetLng: inProgress ? _bc.dropLng.value : null,
-                      padding: const EdgeInsets.only(bottom: 300),
+                      // Bottom focal padding follows the draggable trip sheet so
+                      // the driver stays centred in the visible map; falls back
+                      // to a fixed inset before the first drag / other states.
+                      padding: EdgeInsets.only(
+                        bottom: inProgress && _sheetExtentPx > 0
+                            ? _sheetExtentPx
+                            : 300,
+                      ),
                       interactive: true,
                     );
                   }),
@@ -195,13 +227,41 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
                   // ── Floating Cancel Ride pill (top-right over the map) ──
                   Positioned(top: 16, right: 16, child: _cancelPill()),
 
-                  // ── Bottom card ──
+                  // ── Bottom card (searching / driver-assigned states) ──
                   Positioned(
                     left: 0,
                     right: 0,
                     bottom: 0,
                     child: _buildBottomCard(),
                   ),
+
+                  // ── In-progress: draggable trip panel ──
+                  // Drag it down to reveal the map (kept centred on the driver)
+                  // and pull it back up to see the full trip details.
+                  Obx(() {
+                    if (_bc.state.value != BookingState.inProgress) {
+                      return const SizedBox.shrink();
+                    }
+                    return NotificationListener<DraggableScrollableNotification>(
+                      onNotification: (n) {
+                        _onSheetExtentChanged(n.extent);
+                        return false;
+                      },
+                      child: DraggableScrollableSheet(
+                        initialChildSize: _sheetInitialFrac,
+                        minChildSize: _sheetMinFrac,
+                        maxChildSize: _sheetMaxFrac,
+                        snap: true,
+                        snapSizes: const [
+                          _sheetMinFrac,
+                          _sheetInitialFrac,
+                          _sheetMaxFrac,
+                        ],
+                        builder: (context, scrollController) =>
+                            _inProgressCard(scrollController),
+                      ),
+                    );
+                  }),
                 ],
               ),
             ),
@@ -294,7 +354,7 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
           st == BookingState.driverArrived) {
         return _driverAssignedCard();
       }
-      if (st == BookingState.inProgress) return _inProgressCard();
+      // In-progress is rendered by the draggable sheet in build(), not here.
       return const SizedBox.shrink();
     });
   }
@@ -532,7 +592,8 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
                       final drop = _bc.dropAddress.value;
                       final shareText =
                           'My KEBU Ride:\nPickup: $pickup\nDrop: $drop';
-                      await Share.share(shareText);
+                      await SharePlus.instance
+                          .share(ShareParams(text: shareText));
                     }),
                   ],
                 ),
@@ -683,10 +744,10 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
     );
   }
 
-  /// Live header for the in-progress ride: ETA (backend) + remaining distance
-  /// to the drop (derived from the live driver position) + destination label.
-  /// Mirrors the Figma "Start Trip" info bar and updates as the car moves.
-  Widget _destinationHeader() {
+  /// Hero header for the in-progress ride: live ETA + remaining distance on the
+  /// left (both update as the car moves toward the drop) with the destination
+  /// underneath, and an "On trip" status chip on the right.
+  Widget _etaHeader() {
     return Obx(() {
       final eta = _bc.etaMinutes.value;
       final etaText = eta > 0 ? '$eta min' : '-- min';
@@ -702,29 +763,71 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
       final destLabel = dest.isEmpty ? 'your destination' : dest.split(',').first;
 
       return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(Icons.navigation_rounded, size: 18, color: HexColor('#0F6992')),
-          const SizedBox(width: 8),
-          Text(etaText,
-              style: GoogleFonts.poppins(
-                  fontSize: 18, fontWeight: FontWeight.w800)),
-          if (distText.isNotEmpty) ...[
-            const SizedBox(width: 10),
-            Container(width: 4, height: 4, decoration: BoxDecoration(
-                color: Colors.black26, borderRadius: BorderRadius.circular(2))),
-            const SizedBox(width: 10),
-            Text(distText,
-                style: GoogleFonts.poppins(
-                    fontSize: 18, fontWeight: FontWeight.w800)),
-          ],
-          const Spacer(),
-          Flexible(
-            child: Text('To $destLabel',
-                textAlign: TextAlign.right,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: GoogleFonts.poppins(
-                    fontSize: 12.5, color: Colors.grey.shade600)),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Icon(Icons.navigation_rounded,
+                        size: 18, color: HexColor('#0F6992')),
+                    const SizedBox(width: 8),
+                    Text(etaText,
+                        style: GoogleFonts.poppins(
+                            fontSize: 22,
+                            fontWeight: FontWeight.w800,
+                            color: HexColor('#132235'))),
+                    if (distText.isNotEmpty) ...[
+                      const SizedBox(width: 8),
+                      Text('·',
+                          style: GoogleFonts.poppins(
+                              fontSize: 18, color: HexColor('#94A3B3'))),
+                      const SizedBox(width: 8),
+                      Text(distText,
+                          style: GoogleFonts.poppins(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                              color: HexColor('#364B63'))),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text('Heading to $destLabel',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.poppins(
+                        fontSize: 12.5, color: HexColor('#6B7178'))),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+            decoration: BoxDecoration(
+              color: HexColor('#38B763').withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(99),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 7,
+                  height: 7,
+                  decoration: BoxDecoration(
+                      color: HexColor('#38B763'), shape: BoxShape.circle),
+                ),
+                const SizedBox(width: 6),
+                Text('On trip',
+                    style: GoogleFonts.poppins(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: HexColor('#2E7D32'))),
+              ],
+            ),
           ),
         ],
       );
@@ -740,117 +843,267 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
     return Geolocator.distanceBetween(dLat, dLng, dropLat, dropLng) / 1000.0;
   }
 
-  // ── In progress ──
-  Widget _inProgressCard() {
+  // ── In progress (draggable sheet) ──
+  // [scrollController] is supplied by the DraggableScrollableSheet so dragging
+  // anywhere on the panel moves it (down to reveal the map, up to expand) and
+  // the content scrolls once fully expanded.
+  Widget _inProgressCard(ScrollController scrollController) {
+    final bottomInset = MediaQuery.of(context).padding.bottom;
     return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.10),
+            blurRadius: 20,
+            offset: const Offset(0, -2),
+          ),
+        ],
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
+      child: ListView(
+        controller: scrollController,
+        padding: EdgeInsets.only(bottom: 16 + bottomInset),
         children: [
-          // Live "heading to destination" header — ETA + remaining distance
-          // update in real time as the car moves toward the drop.
-          _destinationHeader(),
           const SizedBox(height: 12),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            decoration: BoxDecoration(
-              color: HexColor('#4CAF50'),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Center(
-              child: Text('Ride in progress',
-                  style: GoogleFonts.poppins(
-                      fontSize: 14,
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600)),
+          // Drag handle — drag the sheet down to see the map, up to expand.
+          Center(
+            child: Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: HexColor('#D3DDE7'),
+                borderRadius: BorderRadius.circular(100),
+              ),
             ),
           ),
-          const SizedBox(height: 12),
-          Obx(() => Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Live ETA + distance hero, with the "On trip" status chip.
+                _etaHeader(),
+                const SizedBox(height: 18),
+            // Journey timeline: pickup (already done) → drop.
+            Container(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+              decoration: BoxDecoration(
+                color: HexColor('#F5F8FB'),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: HexColor('#E1E6EF')),
+              ),
+              child: Column(
                 children: [
-                  Text('Drop',
-                      style: GoogleFonts.poppins(
-                          fontSize: 13, color: Colors.grey)),
-                  Expanded(
-                    child: Text(_bc.dropAddress.value,
-                        style: GoogleFonts.poppins(fontSize: 13),
-                        textAlign: TextAlign.right,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis),
+                  _tripPoint(
+                    marker: Container(
+                      width: 20,
+                      height: 20,
+                      decoration: BoxDecoration(
+                          color: HexColor('#38B763'), shape: BoxShape.circle),
+                      child: const Icon(Icons.check, size: 13, color: Colors.white),
+                    ),
+                    label: 'PICKUP',
+                    address: _bc.pickupAddress.value,
+                    showConnector: true,
+                    dim: true,
+                  ),
+                  _tripPoint(
+                    marker: Icon(Icons.location_on,
+                        size: 22, color: HexColor('#E02D3C')),
+                    label: 'DROP',
+                    address: _bc.dropAddress.value,
+                    showConnector: false,
                   ),
                 ],
-              )),
-          const SizedBox(height: 8),
-          Obx(() => Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              ),
+            ),
+            const SizedBox(height: 14),
+            // Fare highlight
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              decoration: BoxDecoration(
+                color: HexColor('#FFD546').withValues(alpha: 0.18),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: HexColor('#FFD546')),
+              ),
+              child: Row(
                 children: [
-                  Text('Fare',
+                  Icon(Icons.account_balance_wallet_outlined,
+                      size: 18, color: HexColor('#5A4A00')),
+                  const SizedBox(width: 8),
+                  Text('Total fare',
                       style: GoogleFonts.poppins(
-                          fontSize: 13, color: Colors.grey)),
-                  Text('₹${_bc.finalFare.value.toStringAsFixed(0)}',
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w600,
+                          color: HexColor('#5A4A00'))),
+                  const Spacer(),
+                  Obx(() => Text('₹${_bc.finalFare.value.toStringAsFixed(0)}',
                       style: GoogleFonts.poppins(
-                          fontSize: 15, fontWeight: FontWeight.w700)),
+                          fontSize: 20,
+                          fontWeight: FontWeight.w800,
+                          color: HexColor('#132235')))),
                 ],
-              )),
-          const SizedBox(height: 16),
-          // SOS button
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: () async {
-                // Send SOS alert via socket
-                final confirmed = await showDialog<bool>(
-                  context: context,
-                  builder: (ctx) => AlertDialog(
-                    title: Text('SOS Emergency',
-                        style: GoogleFonts.poppins(fontWeight: FontWeight.w600)),
-                    content: Text(
-                        'Are you sure you want to send an emergency alert?',
-                        style: GoogleFonts.poppins()),
-                    actions: [
-                      TextButton(
-                          onPressed: () => Navigator.pop(ctx, false),
-                          child: const Text('Cancel')),
-                      TextButton(
-                          onPressed: () => Navigator.pop(ctx, true),
-                          child: const Text('Send Alert',
-                              style: TextStyle(color: Colors.red))),
-                    ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            // Actions: share live trip + SOS (SOS weighted larger for safety).
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _shareTrip,
+                    icon: Icon(Icons.share_outlined,
+                        size: 18, color: HexColor('#0F6992')),
+                    label: Text('Share',
+                        style: GoogleFonts.poppins(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: HexColor('#0F6992'))),
+                    style: OutlinedButton.styleFrom(
+                      side: BorderSide(color: HexColor('#0F6992')),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14)),
+                    ),
                   ),
-                );
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  flex: 2,
+                  child: ElevatedButton.icon(
+                    onPressed: _sendSOS,
+                    icon: const Icon(Icons.warning_amber_rounded,
+                        color: Colors.white, size: 20),
+                    label: Text('SOS Emergency',
+                        style: GoogleFonts.poppins(
+                            fontSize: 15,
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700)),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: HexColor('#E02D3C'),
+                      elevation: 0,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14)),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+  // ── end in-progress sheet ──
 
-                if (confirmed == true && _bc.bookingId.value.isNotEmpty) {
-                  SocketService().sendSOS(_bc.bookingId.value,
-                      lat: _bc.pickupLat.value, lng: _bc.pickupLng.value);
-                  Get.snackbar(
-                    'SOS',
-                    'Emergency alert sent to emergency services',
-                    backgroundColor: Colors.red,
-                    colorText: Colors.white,
-                    duration: const Duration(seconds: 5),
-                  );
-                }
-              },
-              icon: const Icon(Icons.warning_amber, color: Colors.white),
-              label: Text('SOS Emergency',
-                  style: GoogleFonts.poppins(
-                      color: Colors.white, fontWeight: FontWeight.w600)),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.red.shade600,
-                padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12)),
+  /// One stop on the in-progress journey timeline: a leading marker (with an
+  /// optional connector line down to the next stop), a small label, and the
+  /// address. [dim] greys a completed stop (e.g. the already-done pickup).
+  Widget _tripPoint({
+    required Widget marker,
+    required String label,
+    required String address,
+    required bool showConnector,
+    bool dim = false,
+  }) {
+    return IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Column(
+            children: [
+              SizedBox(width: 22, height: 22, child: Center(child: marker)),
+              if (showConnector)
+                Expanded(
+                  child: Container(
+                    width: 2,
+                    margin: const EdgeInsets.symmetric(vertical: 4),
+                    color: HexColor('#D3DDE7'),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(bottom: showConnector ? 16 : 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(label,
+                      style: GoogleFonts.poppins(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.4,
+                          color: HexColor('#94A3B3'))),
+                  const SizedBox(height: 2),
+                  Text(address.trim().isEmpty ? '—' : address.trim(),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.poppins(
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w500,
+                          color: dim ? HexColor('#94A3B3') : HexColor('#132235'))),
+                ],
               ),
             ),
           ),
         ],
       ),
     );
+  }
+
+  /// Shares the live trip details (pickup, drop, fare, OTP) with a contact so a
+  /// friend/family member can follow along.
+  Future<void> _shareTrip() async {
+    final pickup = _bc.pickupAddress.value;
+    final drop = _bc.dropAddress.value;
+    final fare = _bc.finalFare.value;
+    final otp = _bc.bookingOtp.value;
+    final msg = StringBuffer('I am on a KEBU ride 🚗')
+      ..write('\nPickup: $pickup')
+      ..write('\nDrop: $drop');
+    if (fare > 0) msg.write('\nFare: ₹${fare.toStringAsFixed(0)}');
+    if (otp.isNotEmpty) msg.write('\nOTP: $otp');
+    await SharePlus.instance.share(ShareParams(text: msg.toString()));
+  }
+
+  /// Confirms and sends an SOS emergency alert over the socket with the rider's
+  /// current pickup coordinates.
+  Future<void> _sendSOS() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('SOS Emergency',
+            style: GoogleFonts.poppins(fontWeight: FontWeight.w600)),
+        content: Text('Are you sure you want to send an emergency alert?',
+            style: GoogleFonts.poppins()),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Send Alert',
+                  style: TextStyle(color: Colors.red))),
+        ],
+      ),
+    );
+
+    if (confirmed == true && _bc.bookingId.value.isNotEmpty) {
+      SocketService().sendSOS(_bc.bookingId.value,
+          lat: _bc.pickupLat.value, lng: _bc.pickupLng.value);
+      Get.snackbar(
+        'SOS',
+        'Emergency alert sent to emergency services',
+        backgroundColor: Colors.red,
+        colorText: Colors.white,
+        duration: const Duration(seconds: 5),
+      );
+    }
   }
 }

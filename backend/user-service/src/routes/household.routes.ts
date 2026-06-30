@@ -6,6 +6,7 @@ import ResponseMiddleware from "../middlewares/response.middleware";
 import AuthMiddleware from "../middlewares/auth.middleware";
 import DriverAuthMiddleware from "../middlewares/driver-auth.middleware";
 import HouseholdValidator from "../validators/household.validator";
+import upload from "../middlewares/upload.middleware";
 
 const householdRouter = Router();
 
@@ -88,6 +89,18 @@ householdRouter.get(
 );
 
 /**
+ * Provider/Driver lists available (PENDING, unassigned) bookings they can take.
+ * A reliable fallback to the live socket broadcast. Registered before the
+ * `/booking/:bookingId` route so "available" isn't read as a booking id.
+ */
+householdRouter.get(
+  "/booking/available",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(HouseholdController.getAvailableServiceBookings),
+  ResponseMiddleware,
+);
+
+/**
  * Get booking details
  */
 householdRouter.get(
@@ -108,12 +121,103 @@ householdRouter.put(
 );
 
 /**
+ * "Search again" — re-broadcast a still-PENDING booking to online partners so
+ * the customer can keep searching for another round (instead of auto-cancel).
+ */
+householdRouter.post(
+  "/booking/:bookingId/search-again",
+  AuthMiddleware().verifyUserToken,
+  ErrorHandlerMiddleware(HouseholdController.searchAgainServiceBooking),
+  ResponseMiddleware,
+);
+
+/**
  * Provider/Driver accepts a pending booking
  */
 householdRouter.post(
   "/booking/:bookingId/accept",
   DriverAuthMiddleware().verifyDriverToken,
   ErrorHandlerMiddleware(HouseholdController.acceptServiceBooking),
+  ResponseMiddleware,
+);
+
+/**
+ * Provider/Driver re-opens a booking they're handling (resume from "On Going").
+ */
+householdRouter.get(
+  "/booking/:bookingId/provider-detail",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(HouseholdController.getProviderBookingDetail),
+  ResponseMiddleware,
+);
+
+/**
+ * Provider/Driver cancels a booking they're handling.
+ */
+householdRouter.post(
+  "/booking/:bookingId/provider-cancel",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(HouseholdController.providerCancelServiceBooking),
+  ResponseMiddleware,
+);
+
+/**
+ * Provider/Driver updates booking status (en-route / arrived / in-progress /
+ * completed) while handling a booking.
+ */
+householdRouter.put(
+  "/booking/:bookingId/provider-status",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(HouseholdController.updateProviderBookingStatus),
+  ResponseMiddleware,
+);
+
+/**
+ * Provider uploads the start-of-service photos and starts the service
+ * (marks the booking IN_PROGRESS).
+ */
+householdRouter.post(
+  "/booking/:bookingId/start",
+  DriverAuthMiddleware().verifyDriverToken,
+  upload.fields([
+    { name: "selfie", maxCount: 1 },
+    { name: "devicePhoto", maxCount: 1 },
+    { name: "serialPhoto", maxCount: 1 },
+    { name: "otherPhoto", maxCount: 1 },
+  ]),
+  ErrorHandlerMiddleware(HouseholdController.startServiceBooking),
+  ResponseMiddleware,
+);
+
+/**
+ * Provider updates the booking's extra charge while the work is in progress.
+ */
+householdRouter.put(
+  "/booking/:bookingId/extra-amount",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(HouseholdController.updateBookingExtraAmount),
+  ResponseMiddleware,
+);
+
+/**
+ * Provider ends the work — uploads the finished-work photo (+ optional extra
+ * amount) and marks the booking COMPLETED.
+ */
+/**
+ * Provider/Driver confirms collected payment (cash) → marks booking PAID.
+ */
+householdRouter.post(
+  "/booking/:bookingId/payment-received",
+  DriverAuthMiddleware().verifyDriverToken,
+  ErrorHandlerMiddleware(HouseholdController.markServicePaymentReceived),
+  ResponseMiddleware,
+);
+
+householdRouter.post(
+  "/booking/:bookingId/complete",
+  DriverAuthMiddleware().verifyDriverToken,
+  upload.fields([{ name: "finishedPhoto", maxCount: 1 }]),
+  ErrorHandlerMiddleware(HouseholdController.completeServiceBooking),
   ResponseMiddleware,
 );
 

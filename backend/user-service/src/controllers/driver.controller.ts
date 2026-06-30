@@ -524,42 +524,54 @@ export const acceptRide = async (
     currentBookingId: new Types.ObjectId(bookingId),
   });
 
-  // Emit socket event to user
+  // Notify the customer over the socket first so their app flips to the
+  // live-tracking screen the moment the driver accepts. Reuse the
+  // `acceptingDriver` document already fetched above instead of re-querying
+  // it (this handler previously called getDriverById three times).
   const io = req.app.get("io");
   if (io && updatedBooking) {
-    const driver = await DriverService.getDriverById(driverId);
     const driverLocation = await DriverLocationService.getDriverLocation(
       new Types.ObjectId(driverId),
     );
 
-    io.to(`user_${updatedBooking.userId}`).emit("ride_accepted", {
+    // `assignDriverToBooking` populates `userId`, so it's a Mongoose document —
+    // not an ObjectId. Interpolating it directly yields "user_[object Object]"
+    // (a room nobody is in), the event is dropped, and the customer only catches
+    // up via the 10s poll. Resolve the raw id so the room is correct.
+    const userRoomId = (updatedBooking.userId as any)?._id ?? updatedBooking.userId;
+    io.to(`user_${userRoomId}`).emit("ride_accepted", {
       booking: updatedBooking,
       driver: {
-        _id: driver?._id,
-        fullName: driver?.fullName,
-        mobileNumber: driver?.mobileNumber,
-        rating: driver?.rating,
+        _id: acceptingDriver._id,
+        fullName: acceptingDriver.fullName,
+        mobileNumber: acceptingDriver.mobileNumber,
+        rating: acceptingDriver.rating,
       },
       driverLocation,
     });
   }
 
-  // Persist for in-app notification list.
+  // Respond to the driver app immediately — the screen transition only needs
+  // the assigned booking. The in-app notification is a non-critical write, so
+  // fire it in the background instead of making the driver wait on it.
+  req.rData = { booking: updatedBooking };
+  req.msg = "ride_accepted";
+  next();
+
   if (updatedBooking) {
-    const driverNameForUser = (await DriverService.getDriverById(driverId))?.fullName || "Driver";
-    const acceptedTmpl = NotificationService.NotificationTemplates.rideAccepted(driverNameForUser);
-    await NotificationService.createNotification({
+    const acceptedTmpl = NotificationService.NotificationTemplates.rideAccepted(
+      acceptingDriver.fullName || "Driver",
+    );
+    NotificationService.createNotification({
       userId: updatedBooking.userId as any,
       title: acceptedTmpl.title,
       message: acceptedTmpl.body,
       type: "ORDER",
       data: { bookingId: updatedBooking._id as Types.ObjectId },
-    });
+    }).catch((err) =>
+      console.error("acceptRide: failed to persist notification", err),
+    );
   }
-
-  req.rData = { booking: updatedBooking };
-  req.msg = "ride_accepted";
-  next();
 };
 
 /**
@@ -824,7 +836,11 @@ export const cancelRide = async (
   // Notify user
   const io = req.app.get("io");
   if (io && updatedBooking) {
-    io.to(`user_${updatedBooking.userId}`).emit("ride_cancelled", {
+    // userId is populated → resolve the raw id so the room isn't
+    // "user_[object Object]" (see acceptRide for the full explanation).
+    const targetUserId =
+      (updatedBooking.userId as any)?._id ?? updatedBooking.userId;
+    io.to(`user_${targetUserId}`).emit("ride_cancelled", {
       booking: updatedBooking,
       cancelledBy: "DRIVER",
       reason,
@@ -852,6 +868,37 @@ export const cancelRide = async (
 
   req.rData = { booking: updatedBooking };
   req.msg = "ride_cancelled";
+  next();
+};
+
+/**
+ * Get the authenticated driver's profile — name, phone and avatar for the
+ * partner profile/drawer screen. Fully backend-driven (no hardcoded values).
+ */
+export const getProfile = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  console.log("DriverController => getProfile");
+
+  const driverId = (req as any).driverId;
+  const driver = await DriverService.getDriverById(driverId);
+  if (!driver) {
+    req.rCode = 5;
+    req.msg = "driver_not_found";
+    return next();
+  }
+
+  req.rData = {
+    fullName: driver.fullName || "",
+    mobileNumber: driver.mobileNumber || "",
+    countryCode: (driver as any).countryCode || "+91",
+    profileImage: (driver as any).profileImage || "",
+    email: driver.email || "",
+    rating: driver.rating || 0,
+  };
+  req.msg = "success";
   next();
 };
 
@@ -1151,7 +1198,25 @@ export const getVehicleTypes = async (
 ) => {
   console.log("DriverController => getVehicleTypes");
 
-  const vehicleTypes = await VehicleType.find({ isActive: true })
+  // Optional ?category=CARGO (comma-separated codes) filter. Parcel partners
+  // only get cargo vehicle types (Cargo Bike / Pickup / Large Truck); cab
+  // onboarding omits the param and gets all.
+  const category = ((req.query.category as string) || "").trim();
+  const baseFilter: any = { isActive: true };
+
+  if (category) {
+    const codes = category
+      .split(",")
+      .map((c) => c.trim().toUpperCase())
+      .filter(Boolean);
+    const cats = await VehicleCategory.find({
+      code: { $in: codes },
+      isActive: true,
+    }).select("_id");
+    baseFilter.categoryId = { $in: cats.map((c) => c._id) };
+  }
+
+  const vehicleTypes = await VehicleType.find(baseFilter)
     .populate("categoryId", "name code icon")
     .select("name description image maxSeats categoryId")
     .sort({ name: 1 });
@@ -2017,8 +2082,10 @@ export const getHouseholdDashboard = async (
     .populate("userId", "fullName profileImage")
     .sort({ createdAt: -1 });
 
+  // actualCost (set on completion = base + any extra charge) is the real amount
+  // charged, so prefer it over the pre-extra finalCost.
   const fareOf = (b: any): number =>
-    b.finalCost ?? b.actualCost ?? b.estimatedCost ?? 0;
+    b.actualCost ?? b.finalCost ?? b.estimatedCost ?? 0;
 
   const ongoingStatuses = [
     "ACCEPTED",

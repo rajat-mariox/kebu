@@ -30,6 +30,12 @@ class SocketService {
   final _notificationController = StreamController<Map<String, dynamic>>.broadcast();
   final _newServiceBookingController = StreamController<Map<String, dynamic>>.broadcast();
   final _serviceBookingTakenController = StreamController<Map<String, dynamic>>.broadcast();
+  final _servicePaymentReceivedController = StreamController<Map<String, dynamic>>.broadcast();
+  final _serviceBookingStatusController = StreamController<Map<String, dynamic>>.broadcast();
+  // ── Parcel delivery streams ──
+  final _newDeliveryRequestController = StreamController<Map<String, dynamic>>.broadcast();
+  final _deliveryTakenController = StreamController<Map<String, dynamic>>.broadcast();
+  final _deliveryCancelledController = StreamController<Map<String, dynamic>>.broadcast();
 
   Stream<Map<String, dynamic>> get onNewRideRequest => _newRideRequestController.stream;
   Stream<Map<String, dynamic>> get onRideAcceptedConfirmed => _rideAcceptedConfirmedController.stream;
@@ -38,9 +44,22 @@ class SocketService {
   Stream<Map<String, dynamic>> get onNotification => _notificationController.stream;
   Stream<Map<String, dynamic>> get onNewServiceBooking => _newServiceBookingController.stream;
   Stream<Map<String, dynamic>> get onServiceBookingTaken => _serviceBookingTakenController.stream;
+  Stream<Map<String, dynamic>> get onServicePaymentReceived => _servicePaymentReceivedController.stream;
+  Stream<Map<String, dynamic>> get onServiceBookingStatus => _serviceBookingStatusController.stream;
+  Stream<Map<String, dynamic>> get onNewDeliveryRequest => _newDeliveryRequestController.stream;
+  Stream<Map<String, dynamic>> get onDeliveryTaken => _deliveryTakenController.stream;
+  Stream<Map<String, dynamic>> get onDeliveryCancelled => _deliveryCancelledController.stream;
 
   void connect() {
     if (_socket != null && _socket!.connected) return;
+
+    // Tear down any stale (disconnected) socket before building a fresh one so
+    // its event handlers don't leak and double-fire — duplicate processing of
+    // every ride/booking event causes redundant rebuilds and jank.
+    if (_socket != null) {
+      _socket!.dispose();
+      _socket = null;
+    }
 
     final baseUrl = ApiConfig.baseUrl.replaceAll('/v1/api', '');
     final token = Prefs.auth_token;
@@ -120,6 +139,32 @@ class SocketService {
     _socket!.on('service_booking_taken', (data) {
       debugPrint('[Socket] Service booking taken: $data');
       _serviceBookingTakenController.add(Map<String, dynamic>.from(data));
+    });
+
+    _socket!.on('service_payment_received', (data) {
+      debugPrint('[Socket] Service payment received: $data');
+      _servicePaymentReceivedController.add(Map<String, dynamic>.from(data));
+    });
+
+    _socket!.on('service_booking_status', (data) {
+      debugPrint('[Socket] Service booking status: $data');
+      _serviceBookingStatusController.add(Map<String, dynamic>.from(data));
+    });
+
+    // ── Parcel delivery requests ──
+    _socket!.on('new_delivery_request', (data) {
+      debugPrint('[Socket] New delivery request: $data');
+      _newDeliveryRequestController.add(Map<String, dynamic>.from(data));
+    });
+
+    _socket!.on('delivery_taken', (data) {
+      debugPrint('[Socket] Delivery taken by another driver: $data');
+      _deliveryTakenController.add(Map<String, dynamic>.from(data));
+    });
+
+    _socket!.on('delivery_cancelled', (data) {
+      debugPrint('[Socket] Delivery cancelled: $data');
+      _deliveryCancelledController.add(Map<String, dynamic>.from(data));
     });
 
     _socket!.connect();
@@ -274,6 +319,9 @@ class SocketService {
     _rideTakenController.close();
     _rideCancelledController.close();
     _notificationController.close();
+    _newDeliveryRequestController.close();
+    _deliveryTakenController.close();
+    _deliveryCancelledController.close();
     disconnect();
   }
 }

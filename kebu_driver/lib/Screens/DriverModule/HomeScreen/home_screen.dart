@@ -8,6 +8,7 @@ import 'package:hexcolor/hexcolor.dart';
 
 import 'package:kebu_driver/AppNavigation/app_navigation.dart';
 import 'package:kebu_driver/CommonWidgets/asset_icon.dart';
+import 'package:kebu_driver/CommonWidgets/map_warmup.dart';
 import 'package:kebu_driver/Screens/DriverModule/Controller/driver_booking_controller.dart';
 import 'package:kebu_driver/Screens/DriverModule/HistoryScreen/history_screen.dart';
 import 'package:kebu_driver/Screens/DriverModule/HomeScreen/Widgets/profile_dialog.dart';
@@ -79,6 +80,12 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     });
     _checkActiveBooking();
+
+    // Pre-warm the native Google Maps SDK while the driver is on the home
+    // screen so ride-request and active-ride maps render instantly when opened.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) MapWarmup.ensure(context);
+    });
   }
 
   @override
@@ -268,7 +275,9 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       backgroundColor: _Tokens.background,
       bottomNavigationBar: _bottomBar(),
-      body: SafeArea(
+      body: Stack(
+        children: [
+          SafeArea(
         bottom: false,
         child: Column(
           children: [
@@ -301,6 +310,24 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ],
         ),
+      ),
+          // Floating resume mini-tracker — the live ride, pinned above the bar.
+          Positioned(
+            left: 16,
+            right: 16,
+            bottom: 12,
+            child: Obx(() {
+              final hasLive =
+                  _bc.hasActiveRide && _bc.bookingId.value.isNotEmpty;
+              if (!hasLive) return const SizedBox.shrink();
+              return InkWell(
+                borderRadius: BorderRadius.circular(16),
+                onTap: () => pushTo(context, const ActiveRideScreen()),
+                child: _activeRideCard(),
+              );
+            }),
+          ),
+        ],
       ),
     );
   }
@@ -644,15 +671,10 @@ class _HomeScreenState extends State<HomeScreen> {
           Obx(() {
             final cards = <Widget>[];
 
+            // The live ride now shows in the floating mini-tracker above the
+            // bottom bar, so it isn't duplicated in this list.
             final hasLive =
                 _bc.hasActiveRide && _bc.bookingId.value.isNotEmpty;
-            if (hasLive) {
-              cards.add(InkWell(
-                borderRadius: BorderRadius.circular(16),
-                onTap: () => pushTo(context, const ActiveRideScreen()),
-                child: _activeRideCard(),
-              ));
-            }
 
             // History-sourced ongoing bookings (e.g. scheduled/assigned not
             // yet loaded into the controller), excluding the live one.
@@ -672,15 +694,18 @@ class _HomeScreenState extends State<HomeScreen> {
             }
 
             if (cards.isEmpty) {
-              return Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                child: Text(
-                  'No ongoing bookings',
-                  style: GoogleFonts.nunito(
-                      fontSize: 13, color: Colors.grey.shade600),
-                ),
-              );
+              // Don't show an empty note when the live ride is floating above.
+              return hasLive
+                  ? const SizedBox.shrink()
+                  : Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 8),
+                      child: Text(
+                        'No ongoing bookings',
+                        style: GoogleFonts.nunito(
+                            fontSize: 13, color: Colors.grey.shade600),
+                      ),
+                    );
             }
             return Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),

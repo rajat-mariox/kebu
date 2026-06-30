@@ -71,7 +71,7 @@ class GoogleMapWidget extends StatefulWidget {
   final bool showZoomButtons;
 
   /// Google-encoded polyline for the driving route (origin → destination).
-  /// When set, drawn as a yellow line on the map. Used by ride-tracking to
+  /// When set, drawn as a blue line on the map. Used by ride-tracking to
   /// show the actual road path instead of a straight-line approximation.
   final String? routePolyline;
 
@@ -345,7 +345,7 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
         polylines.add(Polyline(
           polylineId: const PolylineId('route'),
           points: points,
-          color: HexColor('#FFD546'),
+          color: const Color(0xFF2F6FED),
           width: 5,
         ));
       }
@@ -378,23 +378,21 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
       ));
     }
 
-    // Driver marker — rendered as small vehicle icon (falls back to default
-    // marker until the cached bitmap is ready on first paint).
+    // Driver marker — rendered as the small vehicle icon (falls back to the
+    // default marker until the cached bitmap is ready on first paint). Drawn as
+    // an upright billboard pinned at its base, exactly like the nearby-vehicle
+    // markers, so it always stands on the map. The marker assets are side-view
+    // icons, so laying them flat and rotating to the heading skewed them and
+    // made the vehicle look misaligned on the road — the camera still rotates
+    // in navigation mode, the marker just stays standing.
     if (widget.driverLat != null && widget.driverLng != null &&
         widget.driverLat != 0 && widget.driverLng != 0) {
-      final navMode = widget.navigationMode;
       markers.add(Marker(
         markerId: const MarkerId('driver'),
         position: LatLng(widget.driverLat!, widget.driverLng!),
         icon: _iconFor(widget.driverVehicleType) ??
             BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
-        // In navigation mode the vehicle lies flat on the road and rotates to
-        // the live heading so the customer sees it pointing the way it's
-        // actually moving (top-down nav look). Otherwise it stands upright,
-        // pinned at its base.
-        anchor: navMode ? const Offset(0.5, 0.5) : const Offset(0.5, 1.0),
-        rotation: navMode ? (widget.driverHeading ?? 0) : 0,
-        flat: navMode,
+        anchor: const Offset(0.5, 1.0),
         infoWindow: const InfoWindow(title: 'Driver'),
       ));
     }

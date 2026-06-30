@@ -3,9 +3,16 @@ import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:hexcolor/hexcolor.dart';
 import 'package:kebu_driver/AppNavigation/app_navigation.dart';
-import 'package:kebu_driver/CommonWidgets/cleaning_app_bar.dart';
+import 'package:kebu_driver/Screens/CleaningModule/BookingHistoryScreen/booking_history_screen.dart';
+import 'package:kebu_driver/Screens/CleaningModule/NotificationScreen/notification_screen.dart';
 import 'package:kebu_driver/Screens/CleaningModule/ProfileScreen/profile_screen.dart';
+import 'package:kebu_driver/Screens/CleaningModule/OngoingServiceScreen/ongoing_service_screen.dart';
+import 'package:kebu_driver/Screens/CleaningModule/ServiceDetailsScreen/service_details_screen.dart';
+import 'package:kebu_driver/Screens/CleaningModule/TechnicianDashboard/Widgets/customer_direction_screen.dart';
 import 'package:kebu_driver/Screens/CleaningModule/TechnicianDashboard/Widgets/incoming_service_bottom_sheet.dart';
+import 'package:kebu_driver/Screens/CleaningModule/TechnicianDashboard/Widgets/start_customer_direction.dart';
+import 'package:kebu_driver/Screens/DriverModule/WalletModule/my_wallet_screen.dart';
+import 'package:kebu_driver/CommonWidgets/map_warmup.dart';
 import 'package:kebu_driver/Services/driver_api_service.dart';
 import 'package:kebu_driver/Services/socket_service.dart';
 import 'package:kebu_driver/Utils/CustomToast/custome_toast.dart';
@@ -26,7 +33,11 @@ class TechnicianDashboard extends StatefulWidget {
 class _TechnicianDashboardState extends State<TechnicianDashboard>
     with WidgetsBindingObserver {
   StreamSubscription<Map<String, dynamic>>? _newBookingSub;
+  Timer? _availablePoll;
   bool _sheetOpen = false;
+
+  // Jobs already surfaced as a popup, so we don't re-open the sheet for them.
+  final Set<String> _seenJobIds = {};
 
   bool _loading = true;
   bool _togglingStatus = false;
@@ -39,11 +50,25 @@ class _TechnicianDashboardState extends State<TechnicianDashboard>
   Map<String, dynamic> _reviews = {};
   int _selectedTab = 0;
 
+  int _pollTick = 0;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Ensure the realtime socket is connected so a new booking pops up the
+    // INSTANT it's created (this screen can be opened without going through the
+    // ride home, which was the only place that connected the socket before).
+    SocketService().connect();
     _loadDashboard();
+    _loadAvailableJobs();
+    // Fast-poll available jobs as a reliable fallback to the live socket (so a
+    // request still appears within a few seconds even if the socket missed it),
+    // and refresh the dashboard less often so finished jobs leave "On Going".
+    _availablePoll = Timer.periodic(const Duration(seconds: 5), (_) {
+      _loadAvailableJobs();
+      if (++_pollTick % 4 == 0) _loadDashboard(silent: true); // ~every 20s
+    });
 
     _newBookingSub = SocketService().onNewServiceBooking.listen((data) {
       if (!mounted || _sheetOpen) return;
@@ -51,21 +76,14 @@ class _TechnicianDashboardState extends State<TechnicianDashboard>
           ? Map<String, dynamic>.from(data['booking'])
           : Map<String, dynamic>.from(data);
       if (booking.isEmpty) return;
+      _showIncoming(booking);
+    });
 
-      _sheetOpen = true;
-      showModalBottomSheet(
-        context: context,
-        isScrollControlled: true,
-        backgroundColor: Colors.transparent,
-        shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
-        ),
-        builder: (_) => IncomingServiceBottomSheet(booking: booking),
-      ).whenComplete(() {
-        _sheetOpen = false;
-        // A new booking may have changed the dashboard counts/tabs.
-        _loadDashboard(silent: true);
-      });
+    // Pre-warm the native Google Maps SDK while the partner is on the dashboard
+    // so the customer-direction map renders instantly when a booking is
+    // accepted, instead of paying the first-map cold-start cost then.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) MapWarmup.ensure(context);
     });
   }
 
@@ -73,13 +91,60 @@ class _TechnicianDashboardState extends State<TechnicianDashboard>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _newBookingSub?.cancel();
+    _availablePoll?.cancel();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // Refresh when the partner returns to the app so counts stay current.
-    if (state == AppLifecycleState.resumed) _loadDashboard(silent: true);
+    if (state == AppLifecycleState.resumed) {
+      _loadDashboard(silent: true);
+      _loadAvailableJobs();
+    }
+  }
+
+  /// Open the incoming-booking sheet (used by both the live socket event and a
+  /// tap on an available request), refreshing the dashboard afterwards.
+  void _showIncoming(Map<String, dynamic> booking) {
+    if (_sheetOpen) return;
+    _sheetOpen = true;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
+      ),
+      builder: (_) => IncomingServiceBottomSheet(booking: booking),
+    ).whenComplete(() {
+      _sheetOpen = false;
+      _loadDashboard(silent: true);
+      _loadAvailableJobs();
+    });
+  }
+
+  Future<void> _loadAvailableJobs() async {
+    final res = await DriverApiService.getAvailableServiceBookings();
+    if (!mounted || !res.success || res.data == null) return;
+    final data = Map<String, dynamic>.from(res.data as Map);
+    final jobs = (data['bookings'] as List? ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+    // Any job we haven't shown yet → open the incoming popup directly (so a
+    // new request appears on its own, not as a list to tap into). The live
+    // socket does the same; whichever fires first wins — _showIncoming guards
+    // against opening a second sheet.
+    final fresh = jobs
+        .where((j) => !_seenJobIds.contains((j['_id'] ?? '').toString()))
+        .toList();
+    for (final j in jobs) {
+      _seenJobIds.add((j['_id'] ?? '').toString());
+    }
+    if (fresh.isNotEmpty && !_sheetOpen) {
+      _showIncoming(fresh.first);
+    }
   }
 
   Future<void> _loadDashboard({bool silent = false}) async {
@@ -142,45 +207,27 @@ class _TechnicianDashboardState extends State<TechnicianDashboard>
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
-      body: RefreshIndicator(
+      bottomNavigationBar: _bottomNav(),
+      body: Stack(
+        children: [
+          RefreshIndicator(
         onRefresh: () => _loadDashboard(silent: true),
         child: SingleChildScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
           child: Stack(
             alignment: Alignment.topCenter,
             children: [
-              cleaningAppBar(
-                height: 160,
-                context: context,
-                child: Container(
-                  padding: const EdgeInsets.only(left: 12, right: 15),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.start,
-                    children: [
-                      InkWell(
-                        onTap: () => pushTo(context, const ProfileScreen()),
-                        child: CircleAvatar(
-                          radius: 22,
-                          backgroundColor: Colors.white,
-                          child: _partnerAvatar(),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      const Spacer(),
-                      _onlinePill(),
-                      const Spacer(),
-                      Container(width: 55),
-                    ],
-                  ),
-                ),
-              ),
+              _gradientHeader(),
               Container(
                 margin: const EdgeInsets.only(top: 120),
-                padding: const EdgeInsets.only(left: 20, right: 20),
+                // Top padding clears the 40px rounded corners so the stat cards
+                // sit fully on the white card (Figma: counters ~19px below the
+                // card's top edge) instead of poking into the blue header above.
+                padding: const EdgeInsets.only(left: 20, right: 20, top: 18),
                 decoration: const BoxDecoration(
                   borderRadius: BorderRadius.only(
-                      topRight: Radius.circular(32),
-                      topLeft: Radius.circular(32)),
+                      topRight: Radius.circular(40),
+                      topLeft: Radius.circular(40)),
                   color: Colors.white,
                 ),
                 child: _loading
@@ -194,21 +241,84 @@ class _TechnicianDashboardState extends State<TechnicianDashboard>
           ),
         ),
       ),
+          if (_activeServiceJob != null)
+            Positioned(
+              left: 16,
+              right: 16,
+              bottom: 12,
+              child: _activeJobMiniTracker(_activeServiceJob!),
+            ),
+        ],
+      ),
+    );
+  }
+
+  // ── Gradient header ──
+  // Figma fills the header with a smooth top→bottom gradient: a vivid royal
+  // blue (#226DD2) that gradually darkens into indigo (#3B2FA8) by the bottom.
+  // (The earlier [0, 0.19] stops snapped to solid indigo in the top 30px, which
+  // read as a flat dark/purple header — not the gradual blue of the design.)
+  Widget _gradientHeader() {
+    return Container(
+      height: 160,
+      width: MediaQuery.of(context).size.width,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [HexColor("#226DD2"), HexColor("#3B2FA8")],
+        ),
+        borderRadius: const BorderRadius.vertical(bottom: Radius.circular(25)),
+      ),
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+          child: Align(
+            alignment: Alignment.topLeft,
+            child: Row(
+              children: [
+                _profileButton(),
+                const Spacer(),
+                _onlinePill(),
+                const Spacer(),
+                const SizedBox(width: 48),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _profileButton() {
+    return InkWell(
+      onTap: () => pushTo(context, const ProfileScreen()),
+      borderRadius: BorderRadius.circular(99),
+      child: Container(
+        height: 48,
+        width: 48,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          shape: BoxShape.circle,
+          border: Border.all(color: HexColor("#E1E6EF")),
+        ),
+        child: ClipOval(child: _partnerAvatar()),
+      ),
     );
   }
 
   Widget _partnerAvatar() {
     final img = (_partner['profileImage'] ?? '').toString();
     if (img.isNotEmpty) {
-      return ClipOval(
-        child: Image.network(
-          img,
-          height: 44,
-          width: 44,
-          fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) =>
-              Image.asset("assets/person_icon.png", height: 26, width: 26),
-        ),
+      return Image.network(
+        img,
+        height: 48,
+        width: 48,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) =>
+            Image.asset("assets/person_icon.png", height: 26, width: 26),
       );
     }
     return Image.asset("assets/person_icon.png", height: 26, width: 26);
@@ -222,8 +332,15 @@ class _TechnicianDashboardState extends State<TechnicianDashboard>
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
         decoration: BoxDecoration(
-          color: isOnline ? HexColor("#3CAE5C") : Colors.redAccent,
-          borderRadius: BorderRadius.circular(20),
+          color: isOnline ? HexColor("#3CAE5C") : HexColor("#E02D3C"),
+          borderRadius: BorderRadius.circular(99),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.05),
+              blurRadius: 1.5,
+              offset: const Offset(0, 1),
+            ),
+          ],
         ),
         child: _togglingStatus
             ? const SizedBox(
@@ -235,8 +352,58 @@ class _TechnicianDashboardState extends State<TechnicianDashboard>
             : Text(
                 isOnline ? "Online" : "Offline",
                 style: const TextStyle(
-                    color: Colors.white, fontWeight: FontWeight.w600),
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 15),
               ),
+      ),
+    );
+  }
+
+  // ── Bottom navigation bar (Home / Ticket / Wallet / Notification) ──
+  Widget _bottomNav() {
+    return Container(
+      decoration: BoxDecoration(
+        color: HexColor("#F6F7F9"),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.12),
+            blurRadius: 30,
+            offset: const Offset(0, -4),
+          ),
+        ],
+      ),
+      child: SafeArea(
+        top: false,
+        child: SizedBox(
+          height: 60,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
+            children: [
+              _navIcon(Icons.home_filled, active: true, onTap: () {}),
+              _navIcon(Icons.confirmation_number_outlined,
+                  onTap: () => pushTo(context, const BookingHistoryScreen())),
+              _navIcon(Icons.account_balance_wallet_outlined,
+                  onTap: () => pushTo(context, const MyWalletScreen())),
+              _navIcon(Icons.notifications_none_rounded,
+                  onTap: () => pushTo(context, const NotificationScreen())),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _navIcon(IconData icon,
+      {bool active = false, required VoidCallback onTap}) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(30),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        child: Icon(icon,
+            size: 26,
+            color: active ? HexColor("#2F4DBC") : HexColor("#6C757D")),
       ),
     );
   }
@@ -245,22 +412,7 @@ class _TechnicianDashboardState extends State<TechnicianDashboard>
     return Column(
       children: [
         // Stats Grid
-        GridView.count(
-          crossAxisCount: 2,
-          shrinkWrap: true,
-          crossAxisSpacing: 10,
-          mainAxisSpacing: 10,
-          childAspectRatio: 2.2,
-          physics: const NeverScrollableScrollPhysics(),
-          children: List.generate(_stats.length, (i) {
-            final s = _stats[i];
-            return _buildStatCard(
-              (s['value'] ?? '').toString(),
-              (s['label'] ?? '').toString(),
-              _statIcon(i),
-            );
-          }),
-        ),
+        ..._statRows(),
 
         const SizedBox(height: 25),
 
@@ -272,8 +424,10 @@ class _TechnicianDashboardState extends State<TechnicianDashboard>
             alignment: Alignment.center,
             child: Text(
               (_revenueChart['title'] ?? 'Monthly Revenue Rupee').toString(),
-              style:
-                  const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+              style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w500,
+                  color: HexColor("#1C1F34")),
             ),
           ),
         ),
@@ -317,12 +471,14 @@ class _TechnicianDashboardState extends State<TechnicianDashboard>
             children: [
               Text(
                 (_reviews['title'] ?? 'Reviews').toString(),
-                style:
-                    const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w500,
+                    color: HexColor("#1C1F34")),
               ),
-              const Text(
+              Text(
                 "View All",
-                style: TextStyle(fontSize: 13, color: Colors.blue),
+                style: TextStyle(fontSize: 12, color: HexColor("#6C757D")),
               ),
             ],
           ),
@@ -417,9 +573,9 @@ class _TechnicianDashboardState extends State<TechnicianDashboard>
       barRods: [
         BarChartRodData(
           toY: y,
-          width: 18,
-          borderRadius: BorderRadius.circular(4),
-          color: const Color(0xFF2F5AE3),
+          width: 10,
+          borderRadius: BorderRadius.zero,
+          color: HexColor("#2D52C0"),
         ),
       ],
     );
@@ -450,21 +606,179 @@ class _TechnicianDashboardState extends State<TechnicianDashboard>
     );
   }
 
+  /// Re-open a booking the driver is handling and RESUME at the right step
+  /// based on its status (so closing the app mid-service doesn't restart from
+  /// the beginning).
+  Future<void> _openBooking(Map<String, dynamic> b) async {
+    final id = (b['id'] ?? b['_id'] ?? '').toString();
+    if (id.isEmpty) return;
+    final res = await DriverApiService.getServiceBookingDetail(id);
+    if (!mounted) return;
+    if (!res.success || res.data is! Map) {
+      showCustomToast(
+          context, res.message.isNotEmpty ? res.message : 'Could not open booking.');
+      return;
+    }
+    final data = Map<String, dynamic>.from(res.data as Map);
+    final status =
+        ((data['booking'] is Map ? data['booking']['status'] : '') ?? '')
+            .toString();
+
+    final Widget screen;
+    switch (status) {
+      case 'PROVIDER_EN_ROUTE':
+        screen = CustomerDirectionScreen(data: data);
+        break;
+      case 'PROVIDER_ARRIVED':
+        screen = ServiceDetailsScreen(data: data);
+        break;
+      case 'IN_PROGRESS':
+        screen = OngoingServiceScreen(data: data);
+        break;
+      default: // ACCEPTED / PROVIDER_ASSIGNED
+        screen = StartCustomerDirection(data: data);
+    }
+    pushTo(context, screen);
+  }
+
+  /// The single ongoing job (if any), scanned from the dashboard tabs — drives
+  /// the floating resume mini-tracker so closing the app mid-job never loses it.
+  Map<String, dynamic>? get _activeServiceJob {
+    for (final tab in _bookingTabs) {
+      final bookings = (tab['bookings'] as List? ?? const []);
+      for (final raw in bookings) {
+        if (raw is! Map) continue;
+        final b = Map<String, dynamic>.from(raw);
+        if (_ongoingStatuses.contains((b['status'] ?? '').toString())) {
+          return b;
+        }
+      }
+    }
+    return null;
+  }
+
+  String _jobStatusLabel(String s) {
+    switch (s) {
+      case 'PROVIDER_EN_ROUTE':
+        return 'On the way to customer';
+      case 'PROVIDER_ARRIVED':
+        return 'Arrived at location';
+      case 'IN_PROGRESS':
+        return 'Service in progress';
+      default:
+        return 'Job accepted — start now';
+    }
+  }
+
+  /// Floating white resume mini-tracker for the active job (same pattern as the
+  /// customer app). Tap resumes at the right step via [_openBooking].
+  Widget _activeJobMiniTracker(Map<String, dynamic> job) {
+    final status = (job['status'] ?? '').toString();
+    final service = (job['serviceType'] ?? 'Service').toString();
+    final blue = HexColor('#2D52C0');
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: () => _openBooking(job),
+        child: Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: Colors.black.withOpacity(0.06)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.14),
+                blurRadius: 16,
+                offset: const Offset(0, 6),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: HexColor('#EEF1FB'),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(Icons.cleaning_services_rounded,
+                    color: blue, size: 22),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _jobStatusLabel(status),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: HexColor('#1C1F34'),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '$service • Tap to resume',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          color: Colors.black54, fontSize: 11.5),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                decoration: BoxDecoration(
+                  color: HexColor('#EEF1FB'),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text('Resume',
+                    style: TextStyle(
+                        color: blue,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700)),
+              ),
+              const SizedBox(width: 2),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Only an On Going job can be re-opened/handled; Pending & Completed cards
+  // are read-only.
+  static const _ongoingStatuses = {
+    'ACCEPTED',
+    'PROVIDER_ASSIGNED',
+    'PROVIDER_EN_ROUTE',
+    'PROVIDER_ARRIVED',
+    'IN_PROGRESS',
+  };
+
   Widget _buildBookingCard(Map<String, dynamic> b) {
     final discountLabel = (b['discountLabel'] ?? '').toString();
-    return Container(
+    final canOpen = _ongoingStatuses.contains((b['status'] ?? '').toString());
+    return InkWell(
+      onTap: canOpen ? () => _openBooking(b) : null,
+      borderRadius: BorderRadius.circular(16),
+      child: Container(
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.grey.withOpacity(0.5),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          ),
-        ],
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: HexColor("#EBEBEB")),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -475,61 +789,65 @@ class _TechnicianDashboardState extends State<TechnicianDashboard>
               Expanded(
                 child: Text(
                   (b['serviceType'] ?? '').toString(),
-                  style: const TextStyle(
-                      fontWeight: FontWeight.w600, fontSize: 15),
+                  style: TextStyle(
+                      fontWeight: FontWeight.w500,
+                      fontSize: 16,
+                      color: HexColor("#1C1F34")),
                 ),
               ),
               const SizedBox(width: 8),
               Container(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                 decoration: BoxDecoration(
                   color: HexColor("#2D52C0"),
-                  borderRadius: BorderRadius.circular(100),
+                  borderRadius: BorderRadius.circular(43),
                 ),
                 child: Text((b['bookingNumber'] ?? '').toString(),
                     style: const TextStyle(
                         color: Colors.white,
-                        fontSize: 13,
-                        fontWeight: FontWeight.bold)),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600)),
               ),
             ],
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 16),
           Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               Text(
                 (b['priceLabel'] ?? '').toString(),
                 style: TextStyle(
-                    fontSize: 18,
+                    fontSize: 22,
                     color: HexColor("#2D52C0"),
                     fontWeight: FontWeight.bold),
               ),
               if (discountLabel.isNotEmpty) ...[
-                const SizedBox(width: 6),
+                const SizedBox(width: 12),
                 Text(
                   discountLabel,
                   style: TextStyle(
-                      fontSize: 13,
+                      fontSize: 12,
                       color: HexColor("#3CAE5C"),
-                      fontWeight: FontWeight.w500),
+                      fontWeight: FontWeight.w600),
                 ),
               ],
             ],
           ),
           if ((b['address'] ?? '').toString().isNotEmpty) ...[
-            const SizedBox(height: 10),
+            const SizedBox(height: 15),
             _infoRow("assets/location.png", (b['address']).toString()),
           ],
           if ((b['dateLabel'] ?? '').toString().isNotEmpty) ...[
-            const SizedBox(height: 8),
+            const SizedBox(height: 15),
             _infoRow("assets/calendar_2.png", (b['dateLabel']).toString()),
           ],
           if ((b['customerName'] ?? '').toString().isNotEmpty) ...[
-            const SizedBox(height: 8),
+            const SizedBox(height: 15),
             _infoRow("assets/person_icon.png", (b['customerName']).toString()),
           ],
         ],
+      ),
       ),
     );
   }
@@ -563,24 +881,24 @@ class _TechnicianDashboardState extends State<TechnicianDashboard>
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Container(
-            margin: const EdgeInsets.only(top: 4),
+            margin: const EdgeInsets.only(top: 2),
             child: ClipOval(
               child: image.isNotEmpty
                   ? Image.network(
                       image,
-                      width: 42,
-                      height: 42,
+                      width: 50,
+                      height: 50,
                       fit: BoxFit.cover,
                       errorBuilder: (_, __, ___) => Image.asset(
                           "assets/review_image.png",
-                          width: 42,
-                          height: 42),
+                          width: 50,
+                          height: 50),
                     )
                   : Image.asset("assets/review_image.png",
-                      width: 42, height: 42),
+                      width: 50, height: 50),
             ),
           ),
-          const SizedBox(width: 12),
+          const SizedBox(width: 16),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -590,30 +908,32 @@ class _TechnicianDashboardState extends State<TechnicianDashboard>
                   children: [
                     Expanded(
                       child: Text((r['name'] ?? '').toString(),
-                          style: const TextStyle(
-                              fontWeight: FontWeight.w600, fontSize: 15)),
+                          style: TextStyle(
+                              fontWeight: FontWeight.w500,
+                              fontSize: 14,
+                              color: HexColor("#1C1F34"))),
                     ),
                     Text((r['date'] ?? '').toString(),
                         style:
-                            TextStyle(color: HexColor("#6C757D"), fontSize: 13)),
+                            TextStyle(color: HexColor("#6C757D"), fontSize: 12)),
                   ],
                 ),
-                const SizedBox(height: 4),
+                const SizedBox(height: 8),
                 Row(
                   children: [
                     ..._ratingStars(rating),
                     const SizedBox(width: 6),
                     Text(rating.toStringAsFixed(1),
-                        style: const TextStyle(
-                            fontSize: 13, color: Colors.black54)),
+                        style: TextStyle(
+                            fontSize: 14, color: HexColor("#6C757D"))),
                   ],
                 ),
                 if ((r['feedback'] ?? '').toString().isNotEmpty) ...[
-                  const SizedBox(height: 6),
+                  const SizedBox(height: 8),
                   Text(
                     (r['feedback']).toString(),
-                    style: const TextStyle(
-                        fontSize: 13.5, color: Colors.black54, height: 1.3),
+                    style: TextStyle(
+                        fontSize: 14, color: HexColor("#6C757D"), height: 1.43),
                   ),
                 ],
               ],
@@ -651,42 +971,86 @@ class _TechnicianDashboardState extends State<TechnicianDashboard>
     return icons[index % icons.length];
   }
 
+  // Stats as 2 rows of 2 fixed-height cards — avoids the GridView aspect-ratio
+  // overflow and lets long labels (e.g. "Upcoming Services") wrap to two lines.
+  List<Widget> _statRows() {
+    final rows = <Widget>[];
+    for (var i = 0; i < _stats.length; i += 2) {
+      final a = _stats[i];
+      final hasB = i + 1 < _stats.length;
+      // IntrinsicHeight + stretch keeps both cards in a row the same height
+      // (matching the taller, two-line one) while letting the cards size to
+      // their content — so a wrapping label can never overflow a fixed box.
+      rows.add(IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              child: _buildStatCard((a['value'] ?? '').toString(),
+                  (a['label'] ?? '').toString(), _statIcon(i)),
+            ),
+            const SizedBox(width: 20),
+            Expanded(
+              child: hasB
+                  ? _buildStatCard((_stats[i + 1]['value'] ?? '').toString(),
+                      (_stats[i + 1]['label'] ?? '').toString(), _statIcon(i + 1))
+                  : const SizedBox(),
+            ),
+          ],
+        ),
+      ));
+      if (i + 2 < _stats.length) rows.add(const SizedBox(height: 20));
+    }
+    return rows;
+  }
+
   static Widget _buildStatCard(String value, String label, String icon) {
     return Container(
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12),
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(5),
         border: Border.all(color: HexColor("#EBEBEB")),
       ),
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 18),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(value,
-                  style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                      color: HexColor("#2F4DBC"))),
-              const SizedBox(height: 6),
-              Text(label,
-                  style: const TextStyle(fontSize: 12, color: Colors.black54)),
-            ],
-          ),
-          const SizedBox(width: 10),
-          Expanded(child: Container(width: 0)),
-          Container(
-            height: 36,
-            width: 36,
-            padding: const EdgeInsets.all(7),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(100),
-              color: HexColor("#2F4DBC").withOpacity(0.06),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(value,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 22,
+                        height: 1.1,
+                        fontWeight: FontWeight.w600,
+                        color: HexColor("#2F4DBC"))),
+                const SizedBox(height: 10),
+                Text(label,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                        color: HexColor("#6C757D"),
+                        height: 1.2)),
+              ],
             ),
-            child: Image.asset(icon, height: 24, width: 24),
+          ),
+          const SizedBox(width: 8),
+          Container(
+            height: 35,
+            width: 35,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: HexColor("#F0F0FA"),
+            ),
+            child: Image.asset(icon, height: 18, width: 18),
           ),
         ],
       ),
@@ -695,18 +1059,18 @@ class _TechnicianDashboardState extends State<TechnicianDashboard>
 
   static Widget _buildTabButton(String label, bool isActive) {
     return Container(
-      height: 42,
+      height: 38,
       decoration: BoxDecoration(
-        color: isActive ? HexColor("#2E50BF") : const Color(0xFFF5F6FA),
-        borderRadius: BorderRadius.circular(12),
+        color: isActive ? HexColor("#2E50BF") : HexColor("#F6F7F9"),
+        borderRadius: BorderRadius.circular(5),
       ),
       child: Center(
         child: Text(
           label,
           style: TextStyle(
-              color: isActive ? Colors.white : Colors.black54,
-              fontWeight: FontWeight.w600,
-              fontSize: 13),
+              color: isActive ? Colors.white : HexColor("#1C1F34"),
+              fontWeight: FontWeight.w500,
+              fontSize: 14),
         ),
       ),
     );
@@ -715,12 +1079,12 @@ class _TechnicianDashboardState extends State<TechnicianDashboard>
   static Widget _infoRow(String icon, String text) {
     return Row(
       children: [
-        Image.asset(icon, height: 20, width: 20, color: Colors.black),
-        const SizedBox(width: 8),
+        Image.asset(icon, height: 14, width: 14, color: HexColor("#6C757D")),
+        const SizedBox(width: 10),
         Expanded(
           child: Text(
             text,
-            style: TextStyle(fontSize: 11, color: HexColor("#6C757D")),
+            style: TextStyle(fontSize: 12, color: HexColor("#6C757D")),
           ),
         ),
       ],

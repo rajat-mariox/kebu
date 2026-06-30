@@ -10,6 +10,26 @@ import ServiceBooking from "../models/service-booking.model";
 import ServiceCategory from "../models/service-category.model";
 import User from "../models/Users";
 import Offer from "../models/offer.model";
+import { uploadFileToAws } from "../utils/s3";
+import * as CommissionService from "../services/commission.service";
+
+/**
+ * Platform "service charge" for a household booking — the commission the
+ * admin-configured CommissionConfig applies to the service amount. Returns 0
+ * when no active config matches (so the price line simply doesn't render).
+ * Fully config-driven; nothing is hardcoded.
+ */
+const computeServiceCharge = async (
+  categoryId: Types.ObjectId | string | undefined,
+  baseCost: number,
+): Promise<number> => {
+  if (!baseCost || baseCost <= 0) return 0;
+  const config = await CommissionService.findMatchingConfig("household", {
+    serviceCategoryId: categoryId,
+  });
+  if (!config) return 0;
+  return CommissionService.calculateCommission(baseCost, config);
+};
 
 /**
  * Get all service categories
@@ -187,6 +207,26 @@ export const createBooking = async (
     promoCode,
   } = req.body;
 
+  // A real category is required — guard so a stray "default" doesn't crash the
+  // `new Types.ObjectId(categoryId)` cast below with an unhandled 500.
+  if (!categoryId || !Types.ObjectId.isValid(categoryId)) {
+    req.rCode = 0;
+    req.msg = "invalid_category";
+    return next();
+  }
+
+  // The app sends a flat address ({ address|fullAddress, lat, lng }). Normalise
+  // to the booking schema shape so the saved record AND the nearby-driver
+  // broadcast (which previously looked at address.coordinates) both work.
+  const normalizedAddress = {
+    fullAddress: address?.fullAddress || address?.address || "",
+    landmark: address?.landmark || "",
+    lat: Number(address?.lat ?? address?.coordinates?.lat ?? 0),
+    lng: Number(address?.lng ?? address?.coordinates?.lng ?? 0),
+    city: address?.city || "",
+    pincode: address?.pincode || "",
+  };
+
   // Check for active booking
   const activeBooking =
     await HouseholdService.getActiveUserServiceBooking(userId);
@@ -263,7 +303,7 @@ export const createBooking = async (
     description,
     preferredDate: new Date(preferredDate),
     preferredTimeSlot,
-    address,
+    address: normalizedAddress,
     estimatedCost: baseCost,
     finalCost,
     discount: Math.round(discount * 100) / 100,
@@ -286,19 +326,22 @@ export const createBooking = async (
     io.to(`provider_${providerId}`).emit("new_service_booking", { booking });
   }
 
-  // Broadcast to nearby cleaning-service drivers when no provider preselected
-  if (!providerId && io && address?.coordinates?.lat && address?.coordinates?.lng) {
+  // Broadcast to online cleaning partners so the incoming popup is immediate.
+  // We notify ALL online, approved, free cleaning partners (not just the
+  // GPS-nearby ones) so a stale/absent driver location never hides a fresh
+  // request — the partner's available-jobs list stays the reliable fallback.
+  if (!providerId && io) {
     try {
-      const nearby = await DriverLocationService.findNearbyDrivers(
-        address.coordinates.lat,
-        address.coordinates.lng,
-        10,
-        undefined,
-        "cleaning",
-        new Types.ObjectId(categoryId),
-      );
-      nearby.forEach(({ driver }) => {
-        io.to(`driver_${driver._id}`).emit("new_service_booking", { booking });
+      const onlineCleaners = await Driver.find({
+        serviceType: "cleaning",
+        isOnline: true,
+        status: "approved",
+        isActive: true,
+        isDeleted: false,
+        currentBookingId: null,
+      }).select("_id");
+      onlineCleaners.forEach((d) => {
+        io.to(`driver_${d._id}`).emit("new_service_booking", { booking });
       });
     } catch (err) {
       console.error("Error broadcasting new_service_booking:", err);
@@ -311,8 +354,123 @@ export const createBooking = async (
 };
 
 /**
+ * "Search again" — re-broadcast a still-PENDING booking to all online cleaning
+ * partners so the customer can keep searching for another round instead of the
+ * request being auto-cancelled. If a partner accepted in the meantime we just
+ * return the booking so the app can route into tracking.
+ *
+ * Note: dispatch intentionally targets ALL online partners (see createBooking),
+ * so there is no GPS radius to widen — re-broadcasting re-surfaces the request
+ * to everyone online now, including partners who came online or dismissed the
+ * popup during the previous round.
+ */
+export const searchAgainServiceBooking = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  console.log("HouseholdController => searchAgainServiceBooking");
+
+  const userId = (req as any).userId;
+  const { bookingId } = req.params;
+
+  const booking = await HouseholdService.getServiceBookingById(bookingId);
+  if (!booking) {
+    req.rCode = 5;
+    req.msg = "booking_not_found";
+    return next();
+  }
+  if (booking.userId._id.toString() !== userId.toString()) {
+    req.rCode = 4;
+    req.msg = "unauthorized";
+    return next();
+  }
+
+  // Already taken — let the app continue into tracking.
+  const status = String(booking.status);
+  if (status !== "PENDING") {
+    req.rData = { booking, status };
+    req.msg = "already_handled";
+    return next();
+  }
+
+  const io = req.app.get("io");
+  if (io) {
+    try {
+      const onlineCleaners = await Driver.find({
+        serviceType: "cleaning",
+        isOnline: true,
+        status: "approved",
+        isActive: true,
+        isDeleted: false,
+        currentBookingId: null,
+      }).select("_id");
+      onlineCleaners.forEach((d) => {
+        io.to(`driver_${d._id}`).emit("new_service_booking", { booking });
+      });
+    } catch (err) {
+      console.error("Error re-broadcasting new_service_booking:", err);
+    }
+  }
+
+  req.rData = { booking, status: "PENDING" };
+  req.msg = "searching";
+  next();
+};
+
+/**
  * Driver/provider accepts a household service booking
  */
+/**
+ * List PENDING, unassigned bookings a driver can accept. Lenient on purpose
+ * (no geo/online gating) so a request is never lost just because the live
+ * socket broadcast missed the driver. Scoped to the driver's household
+ * categories when they've declared any.
+ */
+export const getAvailableServiceBookings = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  console.log("HouseholdController => getAvailableServiceBookings");
+
+  // Offline drivers must not see any requests. An offline partner polling this
+  // list was the reason requests appeared even when the driver was offline.
+  const driverId = (req as any).driverId || (req as any).userId;
+  const driver = await Driver.findById(driverId).select(
+    "isOnline status isActive isDeleted",
+  );
+  if (
+    !driver ||
+    !driver.isOnline ||
+    driver.status !== "approved" ||
+    !driver.isActive ||
+    driver.isDeleted
+  ) {
+    req.rData = { bookings: [] };
+    req.msg = "success";
+    return next();
+  }
+
+  // Show every PENDING, unassigned household booking to any online cleaning
+  // partner so a request is never hidden by category/location mismatches. The
+  // accept handler still enforces category training for categorised drivers.
+  const query: any = {
+    status: "PENDING",
+    $or: [{ providerId: null }, { providerId: { $exists: false } }],
+  };
+
+  const bookings = await ServiceBooking.find(query)
+    .populate("userId", "fullName profileImage")
+    .populate("categoryId", "name icon")
+    .sort({ createdAt: -1 })
+    .limit(20);
+
+  req.rData = { bookings };
+  req.msg = "success";
+  next();
+};
+
 export const acceptServiceBooking = async (
   req: Request,
   res: Response,
@@ -363,6 +521,12 @@ export const acceptServiceBooking = async (
     return next();
   }
 
+  // Arrival OTP: the customer shares this with the partner so the partner can
+  // confirm they've reached the location. Generated on accept (the customer's
+  // app shows it; it is NOT returned to the partner).
+  if (!booking.otp) {
+    booking.otp = Math.floor(1000 + Math.random() * 9000).toString();
+  }
   booking.providerId = new Types.ObjectId(String(driverId));
   booking.status = "PROVIDER_ASSIGNED";
   await booking.save();
@@ -383,7 +547,8 @@ export const acceptServiceBooking = async (
 
   // Enrich the response so the partner's "Start customer direction" screen can
   // be fully data-driven — the customer's name/phone (for Call/Chat) and the
-  // booking's category name.
+  // booking's category name. The arrival OTP is stripped so only the customer
+  // can disclose it.
   const customerUser = await User.findById(booking.userId).select(
     "fullName mobileNumber countryCode profileImage",
   );
@@ -391,10 +556,42 @@ export const acceptServiceBooking = async (
     ? await ServiceCategory.findById(booking.categoryId).select("name")
     : null;
 
+  const bookingResponse = booking.toObject();
+  delete (bookingResponse as any).otp;
+
+  // Price breakdown for the "Service details" screen — derived from the real
+  // booking costs (base item + any discount → total). Rendered generically by
+  // the app, so extra fee rows added here later show up automatically.
+  const baseCost =
+    booking.estimatedCost ?? booking.actualCost ?? booking.finalCost ?? 0;
+  const discount = booking.discount || 0;
+  const priceBreakdown: Array<{
+    label: string;
+    quantity: number | null;
+    amount: number;
+  }> = [
+    {
+      label: booking.serviceType || booking.description || "Service",
+      quantity: 1,
+      amount: baseCost,
+    },
+  ];
+  if (discount > 0) {
+    priceBreakdown.push({ label: "Discount", quantity: null, amount: -discount });
+  }
+  const totalAmount = booking.finalCost ?? Math.max(baseCost - discount, 0);
+
+  // Platform service charge (commission) shown on the Ongoing-service screen.
+  const serviceCharge = await computeServiceCharge(booking.categoryId, baseCost);
+  (bookingResponse as any).serviceCharge = serviceCharge;
+
   req.rData = {
-    booking,
+    booking: bookingResponse,
     bookingNumber: `#${String(booking._id).slice(-4)}`,
     categoryName: category?.name || "",
+    priceBreakdown,
+    totalAmount,
+    serviceCharge,
     customer: {
       name: customerUser?.fullName || "",
       phone: customerUser?.mobileNumber || "",
@@ -403,6 +600,470 @@ export const acceptServiceBooking = async (
     },
   };
   req.msg = "booking_accepted";
+  next();
+};
+
+/**
+ * Full detail of a booking the driver is handling, in the SAME shape the accept
+ * response returns ({ booking, customer, bookingNumber, categoryName }). Lets
+ * the partner re-open an in-progress job from the "On Going" list. The arrival
+ * OTP is stripped so only the customer can disclose it.
+ */
+export const getProviderBookingDetail = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  console.log("HouseholdController => getProviderBookingDetail");
+
+  const driverId = (req as any).driverId;
+  const { bookingId } = req.params;
+
+  const booking = await ServiceBooking.findById(bookingId);
+  if (!booking) {
+    req.rCode = 5;
+    req.msg = "booking_not_found";
+    return next();
+  }
+  if (String(booking.providerId) !== String(driverId)) {
+    req.rCode = 0;
+    req.msg = "not_your_booking";
+    return next();
+  }
+
+  const customerUser = await User.findById(booking.userId).select(
+    "fullName mobileNumber countryCode profileImage",
+  );
+  const category = booking.categoryId
+    ? await ServiceCategory.findById(booking.categoryId).select("name")
+    : null;
+
+  const bookingResponse = booking.toObject();
+  delete (bookingResponse as any).otp;
+
+  // Same price breakdown the accept response carries, so a re-opened service /
+  // ongoing screen shows pricing correctly.
+  const baseCost =
+    booking.estimatedCost ?? booking.actualCost ?? booking.finalCost ?? 0;
+  const discount = booking.discount || 0;
+  const priceBreakdown: Array<{
+    label: string;
+    quantity: number | null;
+    amount: number;
+  }> = [
+    {
+      label: booking.serviceType || booking.description || "Service",
+      quantity: 1,
+      amount: baseCost,
+    },
+  ];
+  if (discount > 0) {
+    priceBreakdown.push({ label: "Discount", quantity: null, amount: -discount });
+  }
+  const totalAmount = booking.finalCost ?? Math.max(baseCost - discount, 0);
+
+  // Platform service charge (commission) shown on the Ongoing-service screen.
+  const serviceCharge = await computeServiceCharge(booking.categoryId, baseCost);
+  (bookingResponse as any).serviceCharge = serviceCharge;
+
+  req.rData = {
+    booking: bookingResponse,
+    bookingNumber: `#${String(booking._id).slice(-4)}`,
+    categoryName: category?.name || "",
+    priceBreakdown,
+    totalAmount,
+    serviceCharge,
+    customer: {
+      name: customerUser?.fullName || "",
+      phone: customerUser?.mobileNumber || "",
+      countryCode: (customerUser as any)?.countryCode || "+91",
+      profileImage: customerUser?.profileImage || "",
+    },
+  };
+  req.msg = "success";
+  next();
+};
+
+/** Formats a millisecond duration as "1 Hr 58 Mins" / "45 Mins" / "2 Hr". */
+const formatServiceDuration = (ms: number): string => {
+  const totalMin = Math.max(Math.round(ms / 60000), 0);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h > 0 && m > 0) return `${h} Hr ${m} Mins`;
+  if (h > 0) return `${h} Hr`;
+  return `${m} Mins`;
+};
+
+/**
+ * Provider/Driver updates the live status of a booking they're handling
+ * (en-route → arrived → in-progress → completed). Verifies ownership, stamps
+ * the matching timestamp and notifies the customer over the socket so their
+ * tracking screen stays in sync.
+ */
+export const updateProviderBookingStatus = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  console.log("HouseholdController => updateProviderBookingStatus");
+
+  const driverId = (req as any).driverId;
+  const { bookingId } = req.params;
+  const status = (req.body?.status || "").toString();
+
+  const allowed = [
+    "PROVIDER_EN_ROUTE",
+    "PROVIDER_ARRIVED",
+    "IN_PROGRESS",
+    "COMPLETED",
+  ];
+  if (!allowed.includes(status)) {
+    return res
+      .status(400)
+      .json({ code: 0, message: "Invalid booking status.", data: {} });
+  }
+
+  const booking = await ServiceBooking.findById(bookingId);
+  if (!booking) {
+    req.rCode = 5;
+    req.msg = "booking_not_found";
+    return next();
+  }
+
+  if (String(booking.providerId || "") !== String(driverId)) {
+    return res.status(403).json({
+      code: 0,
+      message: "You are not assigned to this booking.",
+      data: {},
+    });
+  }
+
+  // Marking arrival requires the customer's OTP.
+  if (status === "PROVIDER_ARRIVED") {
+    const otp = (req.body?.otp || "").toString().trim();
+    if (!otp) {
+      return res
+        .status(400)
+        .json({ code: 0, message: "Please enter the OTP.", data: {} });
+    }
+    if (!booking.otp || otp !== booking.otp) {
+      return res.status(400).json({
+        code: 0,
+        message: "Invalid OTP. Please check with the customer.",
+        data: {},
+      });
+    }
+  }
+
+  booking.status = status as any;
+  const now = new Date();
+  if (status === "PROVIDER_ARRIVED") booking.providerArrivedAt = now;
+  if (status === "IN_PROGRESS") booking.startedAt = now;
+  if (status === "COMPLETED") booking.completedAt = now;
+  await booking.save();
+
+  const io = req.app.get("io");
+  if (io) {
+    io.to(`user_${booking.userId}`).emit("service_booking_status", {
+      bookingId: String(booking._id),
+      status,
+    });
+  }
+
+  const bookingResponse = booking.toObject();
+  delete (bookingResponse as any).otp;
+
+  req.rData = { booking: bookingResponse };
+  req.msg = "success";
+  next();
+};
+
+/**
+ * Provider starts the service — uploads the captured photos (selfie + device +
+ * serial number, with an optional extra) and moves the booking to IN_PROGRESS.
+ * Requires the selfie, device photo and serial-number photo (newly uploaded or
+ * already saved). Matches the Figma "Service details" photo step.
+ */
+export const startServiceBooking = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  console.log("HouseholdController => startServiceBooking");
+
+  const driverId = (req as any).driverId;
+  const { bookingId } = req.params;
+  const files =
+    (req.files as { [field: string]: Express.Multer.File[] }) || {};
+
+  const booking = await ServiceBooking.findById(bookingId);
+  if (!booking) {
+    req.rCode = 5;
+    req.msg = "booking_not_found";
+    return next();
+  }
+
+  if (String(booking.providerId || "") !== String(driverId)) {
+    return res.status(403).json({
+      code: 0,
+      message: "You are not assigned to this booking.",
+      data: {},
+    });
+  }
+
+  const uploadField = async (
+    field: string,
+  ): Promise<string | undefined> => {
+    const f = files[field]?.[0];
+    if (!f) return undefined;
+    const result = await uploadFileToAws([f]);
+    return Array.isArray(result.images) ? result.images[0] : result.images;
+  };
+
+  const existing = booking.serviceStartPhotos || {};
+  const merged = {
+    selfie: (await uploadField("selfie")) || existing.selfie || "",
+    devicePhoto: (await uploadField("devicePhoto")) || existing.devicePhoto || "",
+    serialPhoto: (await uploadField("serialPhoto")) || existing.serialPhoto || "",
+    otherPhoto: (await uploadField("otherPhoto")) || existing.otherPhoto || "",
+  };
+
+  if (!merged.selfie || !merged.devicePhoto || !merged.serialPhoto) {
+    return res.status(400).json({
+      code: 0,
+      message:
+        "Please capture your selfie, the device photo and the serial number photo.",
+      data: {},
+    });
+  }
+
+  booking.serviceStartPhotos = merged;
+  booking.status = "IN_PROGRESS";
+  booking.startedAt = new Date();
+  await booking.save();
+
+  const io = req.app.get("io");
+  if (io) {
+    io.to(`user_${booking.userId}`).emit("service_booking_status", {
+      bookingId: String(booking._id),
+      status: "IN_PROGRESS",
+    });
+  }
+
+  const bookingResponse = booking.toObject();
+  delete (bookingResponse as any).otp;
+
+  req.rData = { booking: bookingResponse };
+  req.msg = "success";
+  next();
+};
+
+/**
+ * Provider updates the booking's extra charge while the work is in progress
+ * (Figma "Update Booking" screen). Persists the amount and notifies the
+ * customer so their bill stays in sync before completion.
+ */
+export const updateBookingExtraAmount = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  console.log("HouseholdController => updateBookingExtraAmount");
+
+  const driverId = (req as any).driverId;
+  const { bookingId } = req.params;
+
+  const booking = await ServiceBooking.findById(bookingId);
+  if (!booking) {
+    req.rCode = 5;
+    req.msg = "booking_not_found";
+    return next();
+  }
+  if (String(booking.providerId || "") !== String(driverId)) {
+    return res.status(403).json({
+      code: 0,
+      message: "You are not assigned to this booking.",
+      data: {},
+    });
+  }
+
+  const extraAmount = Math.max(Number(req.body?.extraAmount) || 0, 0);
+  booking.extraAmount = extraAmount;
+  booking.extraAmountReason = (req.body?.extraAmountReason || "")
+    .toString()
+    .trim();
+  await booking.save();
+
+  const baseFinal = booking.finalCost ?? booking.estimatedCost ?? 0;
+  const totalAmount = baseFinal + extraAmount;
+
+  const io = req.app.get("io");
+  if (io) {
+    io.to(`user_${booking.userId}`).emit("service_booking_updated", {
+      bookingId: String(booking._id),
+      extraAmount,
+      totalAmount,
+    });
+  }
+
+  const bookingResponse = booking.toObject();
+  delete (bookingResponse as any).otp;
+
+  req.rData = { booking: bookingResponse, extraAmount, totalAmount };
+  req.msg = "success";
+  next();
+};
+
+/**
+ * Provider ends the work — uploads the finished-work photo, optionally adds an
+ * extra charge, and marks the booking COMPLETED. Matches the Figma "Ongoing
+ * services" screen ("Extra amount" + "End work").
+ */
+export const completeServiceBooking = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  console.log("HouseholdController => completeServiceBooking");
+
+  const driverId = (req as any).driverId;
+  const { bookingId } = req.params;
+  const files =
+    (req.files as { [field: string]: Express.Multer.File[] }) || {};
+
+  const booking = await ServiceBooking.findById(bookingId);
+  if (!booking) {
+    req.rCode = 5;
+    req.msg = "booking_not_found";
+    return next();
+  }
+
+  if (String(booking.providerId || "") !== String(driverId)) {
+    return res.status(403).json({
+      code: 0,
+      message: "You are not assigned to this booking.",
+      data: {},
+    });
+  }
+
+  // Finished-work photo is required to end the work.
+  const finishedFile = files["finishedPhoto"]?.[0];
+  const existingAfter = booking.afterImages || [];
+  if (!finishedFile && existingAfter.length === 0) {
+    return res.status(400).json({
+      code: 0,
+      message: "Please capture the finished work photo.",
+      data: {},
+    });
+  }
+  if (finishedFile) {
+    const result = await uploadFileToAws([finishedFile]);
+    const url = Array.isArray(result.images) ? result.images[0] : result.images;
+    booking.afterImages = [...existingAfter, url];
+  }
+
+  // Optional extra charge added by the provider (may already be set via the
+  // "Update Booking" screen — a value here overrides it).
+  const extraAmount = Math.max(Number(req.body?.extraAmount) || 0, 0);
+  if (extraAmount > 0) {
+    booking.extraAmount = extraAmount;
+    booking.extraAmountReason = (req.body?.extraAmountReason || "")
+      .toString()
+      .trim();
+  }
+
+  // Amount actually charged = base final cost + any extra charge.
+  const baseFinal = booking.finalCost ?? booking.estimatedCost ?? 0;
+  booking.actualCost = baseFinal + (booking.extraAmount || 0);
+  booking.status = "COMPLETED";
+  booking.completedAt = new Date();
+  await booking.save();
+
+  const io = req.app.get("io");
+  if (io) {
+    io.to(`user_${booking.userId}`).emit("service_booking_status", {
+      bookingId: String(booking._id),
+      status: "COMPLETED",
+    });
+  }
+
+  // Payment summary for the "Receive Payment" screen: amount to collect, the
+  // duration of the service and the QR payload to scan & pay. The QR encodes a
+  // UPI intent when a merchant VPA is configured, otherwise a Kebu payment
+  // reference URL.
+  const amount = booking.actualCost ?? baseFinal;
+  const startMs = booking.startedAt ? new Date(booking.startedAt).getTime() : 0;
+  const endMs = booking.completedAt
+    ? new Date(booking.completedAt).getTime()
+    : 0;
+  const durationLabel = formatServiceDuration(
+    startMs && endMs ? endMs - startMs : 0,
+  );
+  const merchantVpa = process.env.MERCHANT_UPI_VPA || "";
+  const qrData = merchantVpa
+    ? `upi://pay?pa=${merchantVpa}&pn=KEBU&am=${amount}&cu=INR&tn=${String(
+        booking._id,
+      ).slice(-6)}`
+    : `https://kebu.app/pay/${booking._id}?amount=${amount}`;
+
+  const bookingResponse = booking.toObject();
+  delete (bookingResponse as any).otp;
+
+  req.rData = {
+    booking: bookingResponse,
+    payment: {
+      amount,
+      amountLabel: `₹${amount}`,
+      baseAmount: baseFinal,
+      extraAmount: booking.extraAmount || 0,
+      durationLabel,
+      qrData,
+    },
+  };
+  req.msg = "success";
+  next();
+};
+
+/**
+ * Provider/Driver confirms payment was collected (e.g. cash). Marks the booking
+ * PAID and notifies the customer.
+ */
+export const markServicePaymentReceived = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  console.log("HouseholdController => markServicePaymentReceived");
+
+  const driverId = (req as any).driverId;
+  const { bookingId } = req.params;
+
+  const booking = await ServiceBooking.findById(bookingId);
+  if (!booking) {
+    req.rCode = 5;
+    req.msg = "booking_not_found";
+    return next();
+  }
+  if (String(booking.providerId) !== String(driverId)) {
+    req.rCode = 0;
+    req.msg = "not_your_booking";
+    return next();
+  }
+
+  booking.paymentStatus = "PAID";
+  await booking.save();
+
+  const io = req.app.get("io");
+  if (io) {
+    io.to(`user_${booking.userId}`).emit("service_payment_received", {
+      bookingId: String(booking._id),
+    });
+  }
+
+  req.rData = {
+    booking: { _id: booking._id, paymentStatus: booking.paymentStatus },
+  };
+  req.msg = "payment_received";
   next();
 };
 
@@ -534,16 +1195,70 @@ export const cancelBooking = async (
     reason,
   );
 
-  // Notify provider
-  if (booking.providerId) {
-    const io = req.app.get("io");
-    if (io) {
-      io.to(`provider_${booking.providerId}`).emit("booking_cancelled", {
-        booking: updatedBooking,
+  const io = req.app.get("io");
+  if (io) {
+    // Tell every partner the job is gone so it leaves their "New Requests"
+    // list / incoming popup immediately (not on the next poll).
+    io.emit("service_booking_taken", { bookingId: String(bookingId) });
+    // The assigned provider's live screens react to a status update too (their
+    // socket is in the driver_ room, not provider_).
+    if (booking.providerId) {
+      io.to(`driver_${booking.providerId}`).emit("service_booking_status", {
+        bookingId: String(bookingId),
+        status: "CANCELLED",
         cancelledBy: "USER",
-        reason,
       });
     }
+  }
+
+  req.rData = { booking: updatedBooking };
+  req.msg = "booking_cancelled";
+  next();
+};
+
+/**
+ * Provider/Driver cancels a booking they're handling. Frees it and notifies the
+ * customer so it disappears from their screens immediately.
+ */
+export const providerCancelServiceBooking = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  console.log("HouseholdController => providerCancelServiceBooking");
+
+  const driverId = (req as any).driverId;
+  const { bookingId } = req.params;
+  const reason = (req.body?.reason || "Cancelled by partner").toString();
+
+  const booking = await ServiceBooking.findById(bookingId);
+  if (!booking) {
+    req.rCode = 5;
+    req.msg = "booking_not_found";
+    return next();
+  }
+  if (String(booking.providerId) !== String(driverId)) {
+    req.rCode = 0;
+    req.msg = "not_your_booking";
+    return next();
+  }
+
+  const updatedBooking = await HouseholdService.cancelServiceBooking(
+    bookingId,
+    "PROVIDER",
+    reason,
+  );
+
+  const io = req.app.get("io");
+  if (io) {
+    // Customer's tracking/order screen reacts instantly.
+    io.to(`user_${booking.userId}`).emit("service_booking_status", {
+      bookingId: String(bookingId),
+      status: "CANCELLED",
+      cancelledBy: "PROVIDER",
+    });
+    // Any partner showing it drops it from their list/popup.
+    io.emit("service_booking_taken", { bookingId: String(bookingId) });
   }
 
   req.rData = { booking: updatedBooking };
@@ -1441,6 +2156,7 @@ export const getServiceHours = async (
     timezone: hours.timezone,
     isEnabled: hours.isEnabled,
     closedMessage: hours.closedMessage,
+    arrivalEta: hours.arrivalEta || "10 mins",
     isOpen: status.isOpen,
     reason: status.reason,
   };
@@ -1464,6 +2180,7 @@ export const updateServiceHours = async (
     timezone,
     isEnabled,
     closedMessage,
+    arrivalEta,
   } = req.body;
 
   const timeRegex = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -1491,7 +2208,7 @@ export const updateServiceHours = async (
     ? new Types.ObjectId((req as any).user._id)
     : undefined;
   const updated = await HouseholdService.updateServiceHours(
-    { openTime, closeTime, daysActive, timezone, isEnabled, closedMessage },
+    { openTime, closeTime, daysActive, timezone, isEnabled, closedMessage, arrivalEta },
     adminId,
   );
   req.rData = updated;
