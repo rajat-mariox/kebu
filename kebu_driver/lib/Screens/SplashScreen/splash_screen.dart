@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:kebu_driver/AppNavigation/app_navigation.dart';
-import 'package:kebu_driver/Screens/DriverModule/Controller/driver_booking_controller.dart';
 import 'package:kebu_driver/Screens/DriverModule/HomeScreen/home_screen.dart';
 import 'package:kebu_driver/Screens/DriverModule/IntroScreens/intro_screens_1.dart';
 import 'package:kebu_driver/Screens/CleaningModule/TechnicianDashboard/technician_dashboard.dart';
@@ -42,109 +41,87 @@ class _SplashScreenState extends State<SplashScreen> {
 
   @override
   void initState() {
-    Future.delayed(const Duration(milliseconds: 600), () async {
-      // Request all app permissions once, here. (Prefs/Firebase are already
-      // initialized in main() before runApp.)
-      await PermissionHelper.requestAllPermissions();
-
-      // Permissions are resolved now — kick off GPS so the driver's location
-      // starts streaming without waiting for the next screen.
-      try {
-        Get.find<DriverBookingController>().detectCurrentLocation();
-      } catch (_) {}
-
-      if (!mounted) return;
-
-      // If not logged in, show intro
-      if (!Prefs.check_log_in || Prefs.auth_token.isEmpty) {
-        replaceRoute(context, const IntroScreens());
-        return;
-      }
-
-      // Logged in - fetch dashboard to check status & serviceType
-      final res = await DriverApiService.getDashboard();
-      if (!mounted) return;
-
-      if (res.success && res.data != null) {
-        final driver = res.data['driver'];
-        final status = driver?['status'] ?? '';
-        final serviceType = driver?['serviceType'] ?? '';
-        final onboardingStep = driver?['onboardingStep'] ?? 0;
-
-        if (status == 'approved') {
-          if (serviceType == 'cleaning') {
-            replaceRoute(context, const TechnicianDashboard());
-          } else if (serviceType == 'parcel') {
-            replaceRoute(context, const ParcelHomeScreen());
-          } else {
-            replaceRoute(context, const HomeScreen());
-          }
-        } else if (status == 'documents_uploaded' || status == 'under_verification') {
-          // Onboarding complete but not yet approved - show verification screen
-          replaceRoute(context, const VerificationScreen());
-        } else if (serviceType != null && serviceType.toString().isNotEmpty) {
-          // Onboarding in progress - resume from where they left off.
-          // Seed controller serviceType so subsequent screens branch correctly.
-          try {
-            Get.find<OnboardingController>().serviceType.value =
-                serviceType.toString();
-          } catch (_) {
-            Get.put(OnboardingController()).serviceType.value =
-                serviceType.toString();
-          }
-          replaceRoute(
-            context,
-            _getOnboardingScreen(onboardingStep, serviceType.toString()),
-          );
-        } else {
-          // New driver
-          replaceRoute(context, const WelcomeScreen());
-        }
-      } else {
-        // API failed but user is logged in — retry once before falling back
-        await Future.delayed(const Duration(seconds: 2));
-        if (!mounted) return;
-        final retry = await DriverApiService.getDashboard();
-        if (!mounted) return;
-
-        if (retry.success && retry.data != null) {
-          final driver = retry.data['driver'];
-          final status = driver?['status'] ?? '';
-          final serviceType = driver?['serviceType'] ?? '';
-          final onboardingStep = driver?['onboardingStep'] ?? 0;
-
-          if (status == 'approved') {
-            if (serviceType == 'cleaning') {
-              replaceRoute(context, const TechnicianDashboard());
-            } else if (serviceType == 'parcel') {
-              replaceRoute(context, const ParcelHomeScreen());
-            } else {
-              replaceRoute(context, const HomeScreen());
-            }
-          } else if (status == 'documents_uploaded' || status == 'under_verification') {
-            replaceRoute(context, const VerificationScreen());
-          } else if (serviceType != null && serviceType.toString().isNotEmpty) {
-            try {
-              Get.find<OnboardingController>().serviceType.value =
-                  serviceType.toString();
-            } catch (_) {
-              Get.put(OnboardingController()).serviceType.value =
-                  serviceType.toString();
-            }
-            replaceRoute(
-              context,
-              _getOnboardingScreen(onboardingStep, serviceType.toString()),
-            );
-          } else {
-            replaceRoute(context, const WelcomeScreen());
-          }
-        } else {
-          // Still failing — go to welcome screen
-          replaceRoute(context, const WelcomeScreen());
-        }
-      }
-    });
     super.initState();
+    _bootstrap();
+  }
+
+  Future<void> _bootstrap() async {
+    // Keep the branded splash visible for a minimum time so it doesn't just
+    // flash by when routing is instant (e.g. a first launch going to intro).
+    // This runs concurrently with the work below — it adds no time on top of a
+    // slow dashboard fetch, it only fills in when the work finishes early.
+    final minSplash = Future.delayed(const Duration(milliseconds: 1500));
+
+    // Small delay to let the first frame settle before the permission dialogs.
+    await Future.delayed(const Duration(milliseconds: 100));
+
+    // Request all app permissions once. Fire-and-forget — do NOT await. On a
+    // first launch these native dialogs would otherwise hold the splash until
+    // every prompt is answered. The dialogs still show (now over the screen we
+    // route to), they just no longer block the route decision.
+    // (Prefs/Firebase are already initialized in main() before runApp; GPS
+    // streaming is kicked off from DriverBookingController.onInit.)
+    PermissionHelper.requestAllPermissions();
+
+    final destination = await _resolveDestination();
+
+    // Hold until the branded splash has had its minimum on-screen time.
+    await minSplash;
+    if (!mounted) return;
+    replaceRoute(context, destination);
+  }
+
+  /// Decides which screen to land on. Logged-out users go straight to intro;
+  /// logged-in users are routed from their dashboard status/serviceType, with a
+  /// single retry (the ApiClient timeout bounds each attempt) before falling
+  /// back to the welcome screen.
+  Future<Widget> _resolveDestination() async {
+    if (!Prefs.check_log_in || Prefs.auth_token.isEmpty) {
+      return const IntroScreens();
+    }
+
+    var res = await DriverApiService.getDashboard();
+    if (!(res.success && res.data != null)) {
+      await Future.delayed(const Duration(seconds: 2));
+      res = await DriverApiService.getDashboard();
+    }
+
+    if (!(res.success && res.data != null)) {
+      // Still failing — go to welcome screen.
+      return const WelcomeScreen();
+    }
+
+    final driver = res.data['driver'];
+    final status = driver?['status'] ?? '';
+    final serviceType = driver?['serviceType'] ?? '';
+    final onboardingStep = driver?['onboardingStep'] ?? 0;
+
+    if (status == 'approved') {
+      if (serviceType == 'cleaning') return const TechnicianDashboard();
+      if (serviceType == 'parcel') return const ParcelHomeScreen();
+      return const HomeScreen();
+    }
+
+    if (status == 'documents_uploaded' || status == 'under_verification') {
+      // Onboarding complete but not yet approved - show verification screen.
+      return const VerificationScreen();
+    }
+
+    if (serviceType != null && serviceType.toString().isNotEmpty) {
+      // Onboarding in progress - resume from where they left off. Seed the
+      // controller serviceType so subsequent screens branch correctly.
+      try {
+        Get.find<OnboardingController>().serviceType.value =
+            serviceType.toString();
+      } catch (_) {
+        Get.put(OnboardingController()).serviceType.value =
+            serviceType.toString();
+      }
+      return _getOnboardingScreen(onboardingStep, serviceType.toString());
+    }
+
+    // New driver.
+    return const WelcomeScreen();
   }
 
   /// Routes to the NEXT screen after the last completed step.

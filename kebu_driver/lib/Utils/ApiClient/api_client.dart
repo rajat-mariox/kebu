@@ -28,7 +28,7 @@ class ApiClient {
         Uri.parse('$baseUrl$endpoint'),
         headers: _headers(auth: auth),
         body: body != null ? json.encode(body) : null,
-      );
+      ).timeout(ApiConfig.timeout);
       return _handleResponse(response);
     } catch (e) {
       debugPrint('API POST Error: $e');
@@ -46,7 +46,8 @@ class ApiClient {
       if (queryParams != null && queryParams.isNotEmpty) {
         uri = uri.replace(queryParameters: queryParams);
       }
-      final response = await http.get(uri, headers: _headers(auth: auth));
+      final response =
+          await http.get(uri, headers: _headers(auth: auth)).timeout(ApiConfig.timeout);
       return _handleResponse(response);
     } catch (e) {
       debugPrint('API GET Error: $e');
@@ -64,7 +65,7 @@ class ApiClient {
         Uri.parse('$baseUrl$endpoint'),
         headers: _headers(auth: auth),
         body: body != null ? json.encode(body) : null,
-      );
+      ).timeout(ApiConfig.timeout);
       return _handleResponse(response);
     } catch (e) {
       debugPrint('API PUT Error: $e');
@@ -82,7 +83,7 @@ class ApiClient {
         Uri.parse('$baseUrl$endpoint'),
         headers: _headers(auth: auth),
         body: body != null ? json.encode(body) : null,
-      );
+      ).timeout(ApiConfig.timeout);
       return _handleResponse(response);
     } catch (e) {
       debugPrint('API PATCH Error: $e');
@@ -116,7 +117,9 @@ class ApiClient {
         }
       }
 
-      final streamed = await request.send();
+      // Uploads carry image payloads, so allow a more generous ceiling than
+      // the plain JSON requests — but still bounded so a dead server can't hang.
+      final streamed = await request.send().timeout(const Duration(seconds: 60));
       final response = await http.Response.fromStream(streamed);
       return _handleResponse(response);
     } catch (e) {
