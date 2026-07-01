@@ -16,24 +16,19 @@ import 'package:kebu_driver/Utils/PrefsManager/prefs_manager.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Use Google's latest Android Maps renderer (modern map styling/tiles)
-  // instead of the legacy one. Wrapped in try/catch so a failure here never
-  // blocks app startup.
-  final mapsImpl = GoogleMapsFlutterPlatform.instance;
-  if (mapsImpl is GoogleMapsFlutterAndroid) {
-    try {
-      await mapsImpl.initializeWithRenderer(AndroidMapRenderer.latest);
-    } catch (_) {}
-  }
-
-  // Initialize SharedPreferences
+  // Initialize SharedPreferences (fast, needed before runApp to pick the route).
   await Prefs.load();
   Prefs.loadData();
-  
-  // Initialize Firebase
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
-  );
+
+  // Firebase and the Maps renderer are the two slow init steps. No map is shown
+  // on the splash, so run them concurrently instead of one-after-another to cut
+  // time-to-first-frame roughly in half. The renderer must still be selected
+  // before the first GoogleMap is built — the splash + permissions + dashboard
+  // fetch give it ample time to finish before the home map appears.
+  await Future.wait([
+    Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform),
+    _initMapsRenderer(),
+  ]);
 
   Get.put(AuthController(), permanent: true);
   Get.put(DriverBookingController(), permanent: true);
@@ -47,6 +42,18 @@ void main() async {
   // Fire-and-forget post-launch init (runs while the splash is on screen).
   FCMNotificationService().initialize();
   AppConfigService.initialize();
+}
+
+/// Selects Google's latest Android Maps renderer (modern styling/tiles) instead
+/// of the legacy one. Wrapped in try/catch so a failure here never blocks
+/// startup — the plugin falls back to the legacy renderer on its own.
+Future<void> _initMapsRenderer() async {
+  final mapsImpl = GoogleMapsFlutterPlatform.instance;
+  if (mapsImpl is GoogleMapsFlutterAndroid) {
+    try {
+      await mapsImpl.initializeWithRenderer(AndroidMapRenderer.latest);
+    } catch (_) {}
+  }
 }
 
 class MyApp extends StatelessWidget {

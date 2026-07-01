@@ -257,9 +257,9 @@ export const deleteUserAddress = async (
   res: Response,
   next: NextFunction
 ) => {
-  const { addressId } = req.body;
+  const { id } = req.params;
 
-  await UserAddressService.deleteUserAddress(addressId);
+  await UserAddressService.deleteUserAddress(id);
 
   req.msg = "success";
   next();
